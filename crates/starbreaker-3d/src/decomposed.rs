@@ -250,6 +250,15 @@ fn docking_entity_attachment_offset(
     Some(target_world.inverse().transform_point3(desired_world))
 }
 
+/// Index of the node that lists `node_idx` among its children, if any.
+fn find_parent_node_index(builder: &GlbBuilder, node_idx: u32) -> Option<u32> {
+    builder.nodes_json.iter().position(|node| {
+        node.children
+            .as_ref()
+            .is_some_and(|children| children.iter().any(|child| child.value() as u32 == node_idx))
+    }).map(|idx| idx as u32)
+}
+
 fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChildTransform> {
     let mut builder = GlbBuilder::new();
     let dummy_packed = PackedMeshInfo {
@@ -283,6 +292,11 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
     let mut load_textures = |_materials: Option<&crate::mtl::MtlFile>, _palette: Option<&crate::mtl::TintPalette>| {
         None
     };
+    // Everything emitted so far belongs to the root entity (its NMC hierarchy
+    // plus its skeleton bones). Nodes added past this point are contributed by
+    // children, which lets a child tell whether its parent is a root hardpoint
+    // or a node inside a sibling attachment.
+    let root_node_count = builder.nodes_json.len() as u32;
     let mut resolved = Vec::with_capacity(input.children.len());
 
     for child in &input.children {
@@ -336,11 +350,32 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
             resolved_local_matrix,
         );
 
-        let local_transform_sc = flat_4x4_to_rows(
-            builder.nodes_json[child_idx as usize]
-                .matrix
-                .unwrap_or_else(identity_flat_4x4),
-        );
+        // Store the transform in the space the scene writer will parent this
+        // anchor into.
+        //
+        // A loadout child sits at identity relative to its hardpoint -- the
+        // hardpoint node carries the whole placement. When that hardpoint
+        // belongs to the root entity it never becomes an empty of its own, so
+        // the writer parents the anchor to the entity root; storing the local
+        // matrix there drops the placement and piles every attachment at the
+        // origin. Roots that ship an NMC escape this, which is why only
+        // skeleton-only roots (the ARGO ATLS and its variants) were affected.
+        //
+        // Children attached to a node *inside another child* (the ATLS battery
+        // hanging off the battery storage's `$IP_battery`) keep their local
+        // matrix: that ancestor is emitted as an anchor and already applies its
+        // own transform, so a root-relative matrix would be applied twice.
+        let parent_idx = find_parent_node_index(&builder, child_idx);
+        let parented_to_root_entity = parent_idx.is_none_or(|idx| idx < root_node_count);
+        let local_transform_sc = if parented_to_root_entity {
+            flat_4x4_to_rows(builder.compute_node_world_matrix(child_idx as usize))
+        } else {
+            flat_4x4_to_rows(
+                builder.nodes_json[child_idx as usize]
+                    .matrix
+                    .unwrap_or_else(identity_flat_4x4),
+            )
+        };
         resolved.push(ResolvedChildTransform {
             local_transform_sc,
             resolved_no_rotation: child.no_rotation,
@@ -3121,6 +3156,32 @@ fn hash_finish_entry(
 
 #[cfg(test)]
 mod tests {
+
+    use super::find_parent_node_index;
+
+    fn node_with_children(children: &[u32]) -> gltf_json::Node {
+        gltf_json::Node {
+            children: Some(children.iter().map(|i| gltf_json::Index::new(*i)).collect()),
+            ..Default::default()
+        }
+    }
+
+    /// The transform space a loadout child is stored in depends on whether its
+    /// anchor parents to the root entity or to a node inside a sibling
+    /// attachment, so the parent lookup has to be exact.
+    #[test]
+    fn find_parent_node_index_locates_the_owning_node() {
+        let mut builder = crate::gltf::GlbBuilder::new();
+        builder.nodes_json.push(node_with_children(&[1, 2]));
+        builder.nodes_json.push(gltf_json::Node::default());
+        builder.nodes_json.push(node_with_children(&[3]));
+        builder.nodes_json.push(gltf_json::Node::default());
+
+        assert_eq!(find_parent_node_index(&builder, 1), Some(0));
+        assert_eq!(find_parent_node_index(&builder, 2), Some(0));
+        assert_eq!(find_parent_node_index(&builder, 3), Some(2));
+        assert_eq!(find_parent_node_index(&builder, 0), None, "the root has no parent");
+    }
     use super::*;
     use crate::mtl;
 
