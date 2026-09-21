@@ -173,6 +173,8 @@ pub fn write_glb_with_progress(
     report_progress(progress, 0.05, "Packing root mesh");
     // ---- Pack root entity (drop textures after packing) ----
     let mut scene_nodes = if let Some(root_mesh) = input.root_mesh {
+        // See `build_nmc_hierarchy`: only a freshly appended flat mesh may be popped.
+        let meshes_before_pack = builder.meshes_json.len();
         let root_packed = builder.pack_mesh(
             &root_mesh,
             input.root_materials.as_ref(),
@@ -186,7 +188,13 @@ pub fn write_glb_with_progress(
 
         // ---- Build root NMC scene graph ----
         if let Some(nmc) = input.root_nmc.as_ref().filter(|n| !n.nodes.is_empty()) {
-            let root_nodes = builder.build_nmc_hierarchy(&root_packed, nmc, &root_mesh.submeshes, true);
+            let root_nodes = builder.build_nmc_hierarchy(
+                &root_packed,
+                nmc,
+                &root_mesh.submeshes,
+                true,
+                builder.meshes_json.len() > meshes_before_pack,
+            );
             root_nodes
                 .iter()
                 .map(|&i| json::Index::new(i))

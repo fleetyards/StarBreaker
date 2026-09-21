@@ -266,7 +266,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
 
     let scene_nodes = if let Some(root_nmc) = input.root_nmc.as_ref().filter(|nmc| !nmc.nodes.is_empty()) {
         builder
-            .build_nmc_hierarchy(&dummy_packed, root_nmc, &input.root_mesh.submeshes, false)
+            .build_nmc_hierarchy(&dummy_packed, root_nmc, &input.root_mesh.submeshes, false, false)
             .into_iter()
             .map(json::Index::new)
             .collect::<Vec<_>>()
@@ -4527,7 +4527,7 @@ mod tests {
             submesh_mat_indices: Vec::new(),
             submesh_idx_accessors: Vec::new(),
         };
-        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false);
+        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false, false);
         let target_idx = *builder
             .node_name_to_idx
             .get("hardpoint_docking_module")
