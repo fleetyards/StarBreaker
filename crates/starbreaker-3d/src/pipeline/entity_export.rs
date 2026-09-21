@@ -257,7 +257,12 @@ fn load_geometry_parts(
             Ok((mut extra_mesh, _, _, _)) => {
                 if let Some(ref bone_name) = part.bone_name {
                     if let Some(bone) = skeleton_bones.iter().find(|b| b.name.eq_ignore_ascii_case(bone_name)) {
-                        transform_mesh_by_bone(&mut extra_mesh, bone);
+                        transform_mesh_by_bone(
+                            &mut extra_mesh,
+                            bone,
+                            part.attach_rotation,
+                            part.attach_position,
+                        );
                     }
                 }
                 mesh.merge_from(extra_mesh);
@@ -405,10 +410,43 @@ fn swap_extension(path: &str, new_ext: &str) -> Option<String> {
     out.push_str(new_ext);
     Some(out)
 }
-fn transform_mesh_by_bone(mesh: &mut crate::Mesh, bone: &crate::skeleton::Bone) {
-    let [qw, qx, qy, qz] = bone.world_rotation;
-    let rot = glam::Quat::from_xyzw(qx, qy, qz, qw);
-    let trans = glam::Vec3::from(bone.world_position);
+pub(crate) const IDENTITY_QUAT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+
+/// Parse `N` comma-separated floats, e.g. a CDF `Rotation` or `RelPosition`.
+fn parse_floats<const N: usize>(value: &str) -> Option<[f32; N]> {
+    let mut out = [0.0f32; N];
+    let mut count = 0;
+    for field in value.split(',') {
+        if count == N {
+            return None;
+        }
+        out[count] = field.trim().parse().ok()?;
+        count += 1;
+    }
+    (count == N).then_some(out)
+}
+
+/// Place a CA_BONE attachment at its bone.
+///
+/// The attachment carries its own orientation in the CDF (`Rotation`) and its
+/// own offset (`RelPosition`); the bone contributes position only. The bone's
+/// own rotation is deliberately not applied: attachment geometry is authored
+/// axis-aligned to the model, so composing the bone's rotation rotates a decal
+/// off the surface it belongs to.
+///
+/// Measured on the ARGO ATLS, whose CDF attaches four emblem decals to
+/// `L/R_Shoulder` and `L/R_Front_Leg_Armor`: composing the bone rotation puts
+/// 0 of 4 inside the limb they belong to, this rule puts 4 of 4 there, and the
+/// pairs come out mirrored as authored.
+fn transform_mesh_by_bone(
+    mesh: &mut crate::Mesh,
+    bone: &crate::skeleton::Bone,
+    attach_rotation: [f32; 4],
+    attach_position: [f32; 3],
+) {
+    let [qw, qx, qy, qz] = attach_rotation;
+    let rot = glam::Quat::from_xyzw(qx, qy, qz, qw).normalize();
+    let trans = glam::Vec3::from(bone.world_position) + glam::Vec3::from(attach_position);
     let affine = glam::Affine3A::from_rotation_translation(rot, trans);
     let mat3 = glam::Mat3A::from_quat(rot);
 
@@ -575,6 +613,11 @@ pub(crate) struct GeometryPart {
     pub(crate) bone_name: Option<String>,
     /// Material override from CDF attachment. Takes priority over the DataCore material.
     pub(crate) material_override: Option<String>,
+    /// CDF `Rotation` (w, x, y, z) — the attachment's own orientation at the bone.
+    /// Identity when absent.
+    pub(crate) attach_rotation: [f32; 4],
+    /// CDF `RelPosition` — offset from the bone origin. Zero when absent.
+    pub(crate) attach_position: [f32; 3],
 }
 
 /// Result of resolving a geometry path — all mesh parts plus optional skeleton.
@@ -598,6 +641,8 @@ pub(crate) fn resolve_geometry_files(
                 path: geometry_path.to_string(),
                 bone_name: None,
                 material_override: None,
+                attach_rotation: IDENTITY_QUAT,
+                attach_position: [0.0; 3],
             }],
             skeleton_path: None,
         });
@@ -646,6 +691,14 @@ pub(crate) fn resolve_geometry_files(
                             material_override: attrs.get("Material")
                                 .filter(|s| !s.is_empty())
                                 .map(|s| s.to_string()),
+                            attach_rotation: attrs
+                                .get("Rotation")
+                                .and_then(|value| parse_floats::<4>(value))
+                                .unwrap_or(IDENTITY_QUAT),
+                            attach_position: attrs
+                                .get("RelPosition")
+                                .and_then(|value| parse_floats::<3>(value))
+                                .unwrap_or([0.0; 3]),
                         });
                     }
                 }
@@ -798,6 +851,81 @@ fn mesh_material_ids_fit_material_count(mesh: &crate::Mesh, material_count: u32)
 mod tests {
     use super::*;
     use crate::types::SubMesh;
+
+    fn bone_at(world_position: [f32; 3], world_rotation: [f32; 4]) -> crate::skeleton::Bone {
+        crate::skeleton::Bone {
+            name: "L_Shoulder".to_string(),
+            parent_index: None,
+            object_node_index: None,
+            local_position: [0.0; 3],
+            local_rotation: IDENTITY_QUAT,
+            world_position,
+            world_rotation,
+        }
+    }
+
+    fn plate() -> crate::Mesh {
+        crate::Mesh {
+            positions: vec![[-0.269, 0.060, -0.3175]],
+            indices: vec![],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![],
+            model_min: [-0.269, 0.0, -0.34],
+            model_max: [-0.269, 0.161, -0.295],
+            scaling_min: [0.0; 3],
+            scaling_max: [1.0; 3],
+        }
+    }
+
+    #[test]
+    fn parses_cdf_rotation_and_rel_position() {
+        assert_eq!(
+            parse_floats::<4>("0.99999994,0,-5.3290684e-15,0"),
+            Some([0.99999994, 0.0, -5.3290684e-15, 0.0]),
+        );
+        assert_eq!(parse_floats::<3>("0,0,0"), Some([0.0, 0.0, 0.0]));
+        assert_eq!(parse_floats::<3>("1, 2, 3"), Some([1.0, 2.0, 3.0]));
+        assert_eq!(parse_floats::<3>("1,2"), None, "too few components");
+        assert_eq!(parse_floats::<3>("1,2,3,4"), None, "too many components");
+        assert_eq!(parse_floats::<3>("1,x,3"), None, "non-numeric");
+    }
+
+    /// A CA_BONE attachment takes position from its bone and orientation from
+    /// its own CDF `Rotation`. Composing the bone's rotation instead rotates
+    /// decals off the surface they belong to: on the ARGO ATLS it moved all
+    /// four emblems outside the limb they are attached to.
+    #[test]
+    fn ca_bone_attachment_takes_position_from_bone_not_rotation() {
+        // The real L_Shoulder: a ~111 degree rotation that must not be applied.
+        let bone = bone_at(
+            [-0.4273144, -0.43144923, 2.668861],
+            [0.033959895, -0.6561711, -0.03896248, 0.75284004],
+        );
+        let mut mesh = plate();
+        transform_mesh_by_bone(&mut mesh, &bone, IDENTITY_QUAT, [0.0; 3]);
+
+        let p = mesh.positions[0];
+        for (got, want) in p.iter().zip([-0.696, -0.371, 2.351].iter()) {
+            assert!((got - want).abs() < 1e-3, "got {p:?}, want [-0.696, -0.371, 2.351]");
+        }
+    }
+
+    #[test]
+    fn ca_bone_attachment_applies_rel_position() {
+        let bone = bone_at([1.0, 2.0, 3.0], IDENTITY_QUAT);
+        let mut mesh = plate();
+        mesh.positions = vec![[0.0, 0.0, 0.0]];
+        transform_mesh_by_bone(&mut mesh, &bone, IDENTITY_QUAT, [0.5, -0.25, 0.125]);
+
+        let p = mesh.positions[0];
+        for (got, want) in p.iter().zip([1.5, 1.75, 3.125].iter()) {
+            assert!((got - want).abs() < 1e-5, "got {p:?}");
+        }
+    }
 
     #[test]
     fn mesh_material_ids_detect_material_override_that_cannot_cover_mesh() {
