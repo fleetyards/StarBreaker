@@ -3772,7 +3772,19 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         let local_object_ptr = preallocated_local_object_ptrs[idx];
         let local_object_mat_ptr = ptrs.alloc();
         let local_object_matbits_ptr = ptrs.alloc();
-        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(package_name, instance));
+        // Scene object names are de-duplicated with a `_001`/`_002` suffix, which
+        // changes the CRC32 the animation channels are keyed by. Without the
+        // authored node name only the first copy of a repeated part binds -- the
+        // Corsair's front landing gear retracts while the two tail gears keep
+        // their extended pose. Carry the name on the instance object only: its
+        // anchor is the instance's parent, so tagging both would pose the part
+        // twice.
+        let mut local_object_props = scene_instance_properties(package_name, instance);
+        local_object_props.push((
+            "starbreaker_source_node_name".to_string(),
+            IdPropValue::String(instance.source_object_name.clone()),
+        ));
+        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, local_object_props);
         let anchor_parent_ptr = instance
             .parent_node_name
             .as_ref()
