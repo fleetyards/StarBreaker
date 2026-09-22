@@ -158,8 +158,11 @@ pub(crate) fn load_interiors(
 
     let mut loaded =
         build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
-    let removed =
-        remove_root_geometry_duplicate_interior_placements(&mut loaded, &root_geometry_path);
+    let removed = remove_root_geometry_duplicate_interior_placements(
+        &mut loaded,
+        &root_geometry_path,
+        &root_entity_name,
+    );
     if removed > 0 {
         log::info!(
             "Skipped {removed} root-geometry duplicate interior placement(s) for '{}'",
@@ -191,6 +194,7 @@ fn normalize_geometry_path_key(path: &str) -> String {
 fn remove_root_geometry_duplicate_interior_placements(
     interiors: &mut LoadedInteriors,
     root_geometry_path: &str,
+    root_entity_name: &str,
 ) -> usize {
     let root_key = normalize_geometry_path_key(root_geometry_path);
     if root_key.is_empty() {
@@ -199,7 +203,16 @@ fn remove_root_geometry_duplicate_interior_placements(
 
     let mut removed = 0usize;
     for container in &mut interiors.containers {
-        if container.parent_entity_name.is_some() {
+        // Containers bolted onto one of the root entity's own bones (e.g. the
+        // Corsair's `nose` interior) still belong to the root hull, so a
+        // placement of the root geometry inside them is the same authoring
+        // duplicate as in an unparented container. Only a container owned by a
+        // *different* entity may legitimately place that geometry.
+        if container
+            .parent_entity_name
+            .as_deref()
+            .is_some_and(|name| !name.eq_ignore_ascii_case(root_entity_name))
+        {
             continue;
         }
         container.placements.retain(|(mesh_index, _, _)| {
@@ -1396,17 +1409,28 @@ mod tests {
                     lights: Vec::new(),
                     palette: None,
                 },
+                InteriorContainerData {
+                    name: "root_bone_container".to_string(),
+                    parent_entity_name: Some("EntityClassDefinition.Test".to_string()),
+                    parent_node_name: Some("nose".to_string()),
+                    container_transform: identity,
+                    placements: vec![(0, identity, None), (1, identity, None)],
+                    lights: Vec::new(),
+                    palette: None,
+                },
             ],
         };
 
         let removed = remove_root_geometry_duplicate_interior_placements(
             &mut interiors,
             "Data/Objects/Ships/Test/root.cga",
+            "EntityClassDefinition.Test",
         );
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert_eq!(interiors.containers[0].placements.len(), 1);
         assert_eq!(interiors.containers[1].placements.len(), 1);
+        assert_eq!(interiors.containers[2].placements.len(), 1);
     }
 
     #[test]
