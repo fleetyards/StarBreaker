@@ -420,6 +420,36 @@ class AnimationPoseTests(unittest.TestCase):
 
         self.assertIs(self.package_ops._select_channel_variant_for_object(rear_obj, [front, rear]), rear)
 
+    def test_channel_variant_confidence_reports_decisive_provenance_match(self) -> None:
+        left_parent = self._make_object("body_105_hardpoint_tail_landing_gear_left", (0, 0, 0))
+        left_obj = self._make_object("BONE_foot_001", (0.0, 0.5282, -2.7299))
+        left_obj.parent = left_parent
+        front = {
+            "source_skeleton_path": "Objects/.../DRAK_Corsair_Landing_Gear_Front_CHR.chr",
+            "position": [[0.0, 0.5282, -2.7299]],
+        }
+        left = {
+            "source_skeleton_path": "Objects/.../DRAK_Corsair_Landing_Gear_Left_CHR.chr",
+            "position": [[0.0, 0.158, -2.746]],
+        }
+
+        channel, decisive = self.package_ops._select_channel_variant_with_confidence(
+            left_obj, [front, left]
+        )
+        self.assertIs(channel, left)
+        self.assertTrue(decisive)
+
+    def test_channel_variant_confidence_is_false_when_variants_tie(self) -> None:
+        obj = self._make_object("BONE_foot_001", (0.0, 0.5282, -2.7299))
+        first = {"position": [[0.0, 0.0, 0.0]]}
+        second = {"position": [[1.0, 0.0, 0.0]]}
+
+        channel, decisive = self.package_ops._select_channel_variant_with_confidence(
+            obj, [first, second]
+        )
+        self.assertIs(channel, first)
+        self.assertFalse(decisive)
+
     def test_channel_variant_selection_prefers_direct_mesh_asset_over_parent_tokens(self) -> None:
         rear_parent = self._make_object("body_7_drak_clipper_landing_gear_rear_door_right", (0, 0, 0))
         exterior_obj = self._make_object("door_upper_anim", (0, 0, 0))

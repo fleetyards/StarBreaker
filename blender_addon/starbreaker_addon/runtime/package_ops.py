@@ -3549,13 +3549,28 @@ def _select_channel_variant_for_object(
     obj: bpy.types.Object,
     channels: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    channel, _decisive = _select_channel_variant_with_confidence(obj, channels)
+    return channel
+
+
+def _select_channel_variant_with_confidence(
+    obj: bpy.types.Object,
+    channels: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool]:
+    """Pick this object's channel variant and report whether the pick was decisive.
+
+    A decisive pick means one variant outscored every other, i.e. it was matched
+    on explicit provenance (``source_skeleton_path`` / ``source_node_name``)
+    rather than taken as the arbitrary first entry of a tie.
+    """
     if not channels:
-        return None
+        return None, False
     if len(channels) == 1:
-        return channels[0]
+        return channels[0], False
     scored = [(index, _channel_variant_score(obj, channel)) for index, channel in enumerate(channels)]
-    best_index, _best_score = max(scored, key=lambda item: (item[1], -item[0]))
-    return channels[best_index]
+    best_index, best_score = max(scored, key=lambda item: (item[1], -item[0]))
+    runner_up = max((score for index, score in scored if index != best_index), default=best_score)
+    return channels[best_index], best_score > runner_up
 
 
 def _position_track_matches_bind(
@@ -3722,6 +3737,7 @@ def _animation_bone_candidates(
 ) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool], str]:
     candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
+    decisive_ids: set[int] = set()
 
     for obj in _iter_candidate_bone_objects(package_root):
         key = None
@@ -3733,7 +3749,7 @@ def _animation_bone_candidates(
                 break
         if key is None or not isinstance(variants, list) or not variants:
             continue
-        channel = _select_channel_variant_for_object(obj, variants)
+        channel, decisive = _select_channel_variant_with_confidence(obj, variants)
         if not isinstance(channel, dict):
             continue
         _store_bind_pose_once(obj)
@@ -3741,11 +3757,22 @@ def _animation_bone_candidates(
         if bind_data is None:
             continue
 
+        if decisive:
+            decisive_ids.add(id(obj))
         candidates.append((obj, key, bind_data, channel))
         groups.setdefault(key, []).append((obj, bind_data, channel))
 
     decoder = _select_animation_sample_decoder(candidates)
-    return candidates, _shared_hash_position_policy(groups, decoder=decoder), decoder
+    policy = _shared_hash_position_policy(groups, decoder=decoder)
+    # The shared-hash guard assumes a track may belong to some other part that
+    # merely collides on the bone hash. When the variant was matched on explicit
+    # provenance that assumption is wrong, and the track's authored deviation
+    # from the shared bind is intentional -- e.g. the Corsair's three landing
+    # gears link one skin, so the tail legs' extended pose sits ~0.37m off the
+    # front leg's bind and suppressing position leaves them half-folded.
+    for obj_id in decisive_ids:
+        policy.pop(obj_id, None)
+    return candidates, policy, decoder
 
 
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
