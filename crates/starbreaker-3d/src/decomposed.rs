@@ -273,6 +273,10 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
         submesh_idx_accessors: Vec::new(),
     };
 
+    let root_has_nmc_hierarchy = input
+        .root_nmc
+        .as_ref()
+        .is_some_and(|nmc| !nmc.nodes.is_empty());
     let scene_nodes = if let Some(root_nmc) = input.root_nmc.as_ref().filter(|nmc| !nmc.nodes.is_empty()) {
         builder
             .build_nmc_hierarchy(&dummy_packed, root_nmc, &input.root_mesh.submeshes, false, false)
@@ -355,11 +359,13 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
         //
         // A loadout child sits at identity relative to its hardpoint -- the
         // hardpoint node carries the whole placement. When that hardpoint
-        // belongs to the root entity it never becomes an empty of its own, so
-        // the writer parents the anchor to the entity root; storing the local
+        // belongs to a skeleton-only root it never becomes an empty of its own,
+        // so the writer parents the anchor to the entity root; storing the local
         // matrix there drops the placement and piles every attachment at the
-        // origin. Roots that ship an NMC escape this, which is why only
-        // skeleton-only roots (the ARGO ATLS and its variants) were affected.
+        // origin. Only such roots (the ARGO ATLS and its variants) need the
+        // world matrix -- a root that ships an NMC exports its hardpoints as
+        // real nodes, the writer parents the anchor to one of them, and a
+        // world matrix would then be applied twice.
         //
         // Children attached to a node *inside another child* (the ATLS battery
         // hanging off the battery storage's `$IP_battery`) keep their local
@@ -367,7 +373,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
         // own transform, so a root-relative matrix would be applied twice.
         let parent_idx = find_parent_node_index(&builder, child_idx);
         let parented_to_root_entity = parent_idx.is_none_or(|idx| idx < root_node_count);
-        let local_transform_sc = if parented_to_root_entity {
+        let local_transform_sc = if parented_to_root_entity && !root_has_nmc_hierarchy {
             flat_4x4_to_rows(builder.compute_node_world_matrix(child_idx as usize))
         } else {
             flat_4x4_to_rows(
