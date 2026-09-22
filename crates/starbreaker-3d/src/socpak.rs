@@ -551,11 +551,16 @@ fn push_item_port_mesh(
     let rot = parse_csv_f64(attrs.get("rotation").copied().unwrap_or("1,0,0,0"));
     let scale = [1.0, 1.0, 1.0];
     let world_transform = glam::Mat4::from_cols_array_2d(&pos_rot_scale_to_4x4(&pos, &rot, &scale));
-    let reference_transform = if attrs.get("resourceLinkToParent").copied() == Some("1") {
-        root_item_port_reference_transform.unwrap_or(container_transform)
-    } else {
-        container_transform
-    };
+    // `resourceLinkToParent` describes resource linkage, not the space the
+    // offset is authored in — the Corsair's tail container has `Port0` (link=1)
+    // and `Port3` (link=0) sharing one `interactionOffset`. Every ItemPort in a
+    // root container XML is authored against the root entity, so all of them
+    // convert through the root reference when one was resolved. Treating the
+    // unlinked ones as container-space left them carrying the container's own
+    // bone offset twice: the Corsair's ramp door panels ended up 16.5m behind
+    // the hull. `container_transform` is only correct when no root reference
+    // exists.
+    let reference_transform = root_item_port_reference_transform.unwrap_or(container_transform);
     let reference_transform = glam::Mat4::from_cols_array_2d(&reference_transform);
     let transform = (reference_transform.inverse() * world_transform).to_cols_array_2d();
     meshes.push(InteriorMesh {
@@ -1793,6 +1798,37 @@ mod tests {
         assert!((meshes[0].transform[3][0] - 7.625).abs() < 1e-6);
         assert!((meshes[0].transform[3][1] + 25.656252).abs() < 1e-6);
         assert!((meshes[0].transform[3][2] - 3.6906581).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_item_port_meshes_from_text_xml_uses_reference_transform_for_unlinked_ports() {
+        // `resourceLinkToParent="0"` does not mean "authored in container space":
+        // the Corsair's ramp door panels are unlinked yet still relative to the
+        // root, and using the container transform left them offset by the
+        // container's bone translation.
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port5_ControlPanel_Screen_DoorControl_Physical_Corsair_Ramp_Int_Left[int_hold_SETUP]"
+                    interactionOffset="4.2099118,-20.362814,-0.25136301"
+                    rotation="1,0,0,0"
+                    resourceLinkToParent="0" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            Some(build_container_transform([0.0, -16.5, 0.0], [0.0, 0.0, 0.0])),
+        );
+        assert_eq!(meshes.len(), 1);
+        assert!((meshes[0].transform[3][0] - 4.2099118).abs() < 1e-5);
+        assert!((meshes[0].transform[3][1] - -3.862814).abs() < 1e-5);
+        assert!((meshes[0].transform[3][2] - -0.25136301).abs() < 1e-5);
     }
 
     #[test]
