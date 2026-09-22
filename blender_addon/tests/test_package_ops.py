@@ -1021,6 +1021,44 @@ class PackageOpsTests(unittest.TestCase):
             (0.25, 0.5, 0.75, 1.0),
         )
 
+    def test_shared_glow_control_caches_empty_result(self) -> None:
+        """A package with no glow targets must not re-scan on every call.
+
+        The tools panel asks this from `draw()`, so an uncached negative answer
+        re-walked every object and re-parsed each material sidecar on every
+        redraw, stalling the viewport.
+        """
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(submaterials=[])
+        loads: list[str] = []
+
+        def _load_sidecar(path: str):
+            loads.append(path)
+            return sidecar
+
+        package = types.SimpleNamespace(load_material_sidecar=_load_sidecar)
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            first = self.package_ops.shared_glow_control_enabled(package_root)
+            scans_after_first = len(loads)
+            second = self.package_ops.shared_glow_control_enabled(package_root)
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+        self.assertFalse(first)
+        self.assertFalse(second)
+        self.assertEqual(len(loads), scans_after_first, "second call re-scanned the package")
+        payload = json.loads(package_root["starbreaker_shared_glow_control"])
+        self.assertEqual(payload["targets"], [])
+
     def test_shared_glow_control_enabled_discovers_mesh_decal_glow_targets(self) -> None:
         package_root = FakeObject("Root", starbreaker_package_root=True)
         mesh = FakeObject(

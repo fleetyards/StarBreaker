@@ -1210,8 +1210,12 @@ def _shared_glow_control_payload(package_root: bpy.types.Object) -> dict[str, An
                     "blender_material_name": getattr(submaterial, "blender_material_name", None),
                 }
             )
-    if not targets:
-        return None
+    # Cache the "no targets" answer as well. The scan above walks every object in
+    # the package and parses each referenced material sidecar, so leaving it
+    # uncached made a package without shared-glow materials pay for the whole
+    # sweep again on every call -- and the tools panel calls this from `draw()`,
+    # i.e. on every redraw (~3s for the Corsair, with sidecars on a network
+    # drive). That is what stalls the viewport at a regular interval.
     data = {
         "label": "Shared Glow",
         "units": "emission_strength_delta",
