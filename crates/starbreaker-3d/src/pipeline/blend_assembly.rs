@@ -921,7 +921,22 @@ pub fn write_decomposed_export_blend(
             nmc: material_view.glb_nmc,
             interior_placement_space: true,
         };
-        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), interior_entry);
+        let mesh_key = mesh_asset.to_ascii_lowercase();
+        // An interior placement writes its asset in scene-axis space as a single
+        // flat mesh. Letting that replace a root/child entry would strip that
+        // asset's node hierarchy (hardpoints, animated parts) and leave it in the
+        // wrong basis, so flag the collision rather than corrupting it silently.
+        if mesh_data_map
+            .get(&mesh_key)
+            .is_some_and(|existing| !existing.interior_placement_space)
+        {
+            log::warn!(
+                "interior placement '{}' reuses entity mesh asset '{mesh_asset}' — \
+                 the flat interior-space variant will replace the node hierarchy",
+                entry.cgf_path
+            );
+        }
+        mesh_data_map.insert(mesh_key, interior_entry);
         Some(loaded)
     };
 
