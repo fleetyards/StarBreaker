@@ -450,6 +450,25 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertIs(channel, first)
         self.assertFalse(decisive)
 
+    def test_compress_only_clip_layers_over_the_base_pose(self) -> None:
+        compress = {"name": "landing_gear_compress", "fragments": [{"frag_tags": ["Compress"]}]}
+        self.assertTrue(self.package_ops._clip_layers_over_base(compress, None))
+
+    def test_deploy_retract_clip_does_not_layer(self) -> None:
+        extend = {
+            "name": "landing_gear_extend",
+            "fragments": [
+                {"frag_tags": ["Deploy"]},
+                {"frag_tags": ["Retract"]},
+                {"frag_tags": ["Compress"]},
+            ],
+        }
+        self.assertFalse(self.package_ops._clip_layers_over_base(extend, None))
+
+    def test_clip_without_fragments_does_not_layer(self) -> None:
+        door = {"name": "door_close"}
+        self.assertFalse(self.package_ops._clip_layers_over_base(door, None))
+
     def test_channel_variant_selection_prefers_direct_mesh_asset_over_parent_tokens(self) -> None:
         rear_parent = self._make_object("body_7_drak_clipper_landing_gear_rear_door_right", (0, 0, 0))
         exterior_obj = self._make_object("door_upper_anim", (0, 0, 0))

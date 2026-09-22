@@ -2139,6 +2139,53 @@ def _effective_fragment_reverse_playback(fragment: dict[str, Any] | None) -> boo
     return _fragment_reverse_playback(fragment) or _fragment_semantic_reverse_playback(fragment)
 
 
+# Mannequin fragment tags that refine an existing pose rather than replace it.
+_LAYERED_FRAGMENT_TAGS = {"compress"}
+
+
+def _clip_layers_over_base(
+    clip: dict[str, Any] | None,
+    fragment: dict[str, Any] | None,
+) -> bool:
+    """Whether enabling this clip should keep overlapping clips enabled.
+
+    A fragment-qualified selection answers directly. A bare clip name resolves
+    no fragment (see `_find_animation_selection`), so fall back to the clip's
+    own fragment list: a clip that exists *only* as layered fragments — as
+    `landing_gear_compress` does — layers, while `landing_gear_extend` carries
+    Deploy/Retract fragments too and keeps replacing the pose.
+    """
+    if isinstance(fragment, dict):
+        return _fragment_layers_over_base(fragment)
+    fragments = clip.get("fragments") if isinstance(clip, dict) else None
+    if not isinstance(fragments, list):
+        return False
+    known = [entry for entry in fragments if isinstance(entry, dict)]
+    return bool(known) and all(_fragment_layers_over_base(entry) for entry in known)
+
+
+def _fragment_layers_over_base(fragment: dict[str, Any] | None) -> bool:
+    """Whether this fragment plays on top of the current pose.
+
+    ``Deploy``/``Retract`` are opposite states of one scope, so enabling either
+    must switch the other off. ``Compress`` is different: CryEngine layers the
+    suspension travel over the deployed gear (the matching fragment inside
+    `landing_gear_extend` carries a ``LayerManualUpdate`` procedural on its own
+    scope layer). Since channels hold absolute parent-local transforms, applying
+    the narrower clip after the base one simply overwrites the shared joints --
+    nothing accumulates -- so `landing_gear_compress` may coexist with
+    `landing_gear_extend` instead of cancelling it.
+    """
+    if not isinstance(fragment, dict):
+        return False
+    tags = fragment.get("frag_tags")
+    if not isinstance(tags, list):
+        return False
+    return any(
+        isinstance(tag, str) and tag.strip().lower() in _LAYERED_FRAGMENT_TAGS for tag in tags
+    )
+
+
 def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str | None:
     """Map a Mannequin fragment + snap mode to a transition state policy.
 
@@ -2739,7 +2786,7 @@ def apply_animation_mode_to_package_root(
     # If enabling a clip that overlaps channels with already enabled clips,
     # disable those conflicting modes first so poses do not stack into an
     # impossible "exploded" state.
-    if normalized_mode != "none":
+    if normalized_mode != "none" and not _clip_layers_over_base(clip, fragment):
         target_hashes = _clip_bone_hashes(clip)
         conflicting_names: set[str] = set()
         if target_hashes:
