@@ -141,6 +141,21 @@ pub fn assemble_glb_with_loadout_with_progress(
     report_progress(progress, FLATTEN_STAGE_START, "Flattening attachments");
     let phase_start = Instant::now();
     if opts.include_attachments {
+        // The Blender importer resolves parent entities in child-list order.
+        // Emit loadout entities first so a nested gear payload can attach to its
+        // command-module hardpoints instead of falling back to the ship root.
+
+        flatten_resolved_tree(
+            &resolved.children,
+            &resolved.entity_name,
+            None,
+            db,
+            p4k,
+            &child_opts,
+            child_payload_material_mode,
+            existing_asset_paths,
+            &mut child_payloads,
+        );
         let mut gear_cache: HashMap<String, LandingGearAsset> = HashMap::new();
         for (gear_path, bone_name, parent_entity_name) in &gear_parts {
             let asset = if let Some(cached) = gear_cache.get(gear_path.as_str()) {
@@ -224,17 +239,6 @@ pub fn assemble_glb_with_loadout_with_progress(
             "[gear] {} hardpoints, {} unique CGFs cached",
             gear_parts.len(),
             gear_cache.len(),
-        );
-        flatten_resolved_tree(
-            &resolved.children,
-            &resolved.entity_name,
-            None,
-            db,
-            p4k,
-            &child_opts,
-            child_payload_material_mode,
-            existing_asset_paths,
-            &mut child_payloads,
         );
     }
     log::info!("[timing] load_landing_gear + flatten_tree: {:.2}s", phase_start.elapsed().as_secs_f32());
