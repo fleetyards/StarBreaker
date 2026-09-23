@@ -1946,6 +1946,16 @@ def available_package_animation_names(package: PackageBundle) -> list[str]:
     return [name for name, _ in available_package_animation_items(package)]
 
 
+def _package_animation_identity(name: str, entity_prefix: str) -> str:
+    """Return a path-independent key for detecting duplicate clip entries."""
+    basename = name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    identity = Path(basename).stem.casefold()
+    prefix = entity_prefix.casefold()
+    if prefix and identity.startswith(f"{prefix}_"):
+        identity = identity[len(prefix) + 1 :]
+    return identity
+
+
 def available_package_animation_items(package: PackageBundle) -> list[tuple[str, str]]:
     """Return ``(clip_name, display_name)`` pairs for exported animations.
 
@@ -1961,6 +1971,10 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
         if _is_preferred_package_animation_name(str(clip.get("name", "")).strip())
     }
     entity_prefix = _entity_name_prefix(package)
+    preferred_identities = {
+        _package_animation_identity(name, entity_prefix)
+        for name in preferred_exact_names
+    }
 
     fragment_items: dict[tuple[str, str], tuple[int, str, str]] = {}
     items: list[tuple[str, str]] = []
@@ -1976,7 +1990,11 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
                     fragment_items[dedupe_key] = (specificity, key, display_name)
             continue
         if preferred_exact_names and clip_name not in preferred_exact_names:
-            continue
+            # Suppress only path-based duplicates of a short root clip.
+            # Distinct CAFs often carry the actual moving subassembly tracks
+            # while a root DBA clip drives only doors or a controller node.
+            if _package_animation_identity(clip_name, entity_prefix) in preferred_identities:
+                continue
         items.append((clip_name, _animation_display_name(clip, entity_prefix=entity_prefix)))
     items.extend((key, display_name) for _, key, display_name in fragment_items.values())
     return items
