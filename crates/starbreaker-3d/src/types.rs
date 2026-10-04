@@ -213,7 +213,6 @@ fn split_rigid_weighted_submeshes(
                 .extend_from_slice(triangle);
         }
 
-        let rigid_ratio = rigid_triangles as f32 / triangle_count as f32;
         // Phase 47.4: previously bailed when `grouped_indices.len() <= 1`,
         // but a submesh whose triangles all belong to a single dominant
         // joint (e.g. an un-skinned residual housing geometry that the
@@ -222,9 +221,20 @@ fn split_rigid_weighted_submeshes(
         // still be reassigned to that joint, otherwise it stays static
         // at the CHR root while its owning bone animates. The split loop
         // below handles len == 1 correctly (it just emits one rebuilt
-        // submesh with `node_parent_index = joint`); only `!valid` and
-        // `rigid_ratio < 0.9` (truly soft-skinned) need to bail.
-        if !valid || grouped_indices.is_empty() || rigid_ratio < 0.9 {
+        // submesh with `node_parent_index = joint`).
+        //
+        // Soft-skinned submeshes (few triangles share one dominant joint)
+        // are split the same way: no export path emits skin weights, so
+        // keeping them whole left them frozen at the root -- e.g. the
+        // Constellation's rear landing-gear leg, whose pistons blend across
+        // 3-4 bones, never retracted. Per-joint pieces follow their bones
+        // rigidly; blended regions move without stretching. Only an
+        // unmapped vertex (`!valid`) keeps the submesh whole.
+        log::trace!(
+            "skin submesh: {rigid_triangles}/{triangle_count} rigid triangles across {} joints",
+            grouped_indices.len()
+        );
+        if !valid || grouped_indices.is_empty() {
             let mut original = submesh.clone();
             original.first_index = rebuilt_indices.len() as u32;
             original.num_indices = source_indices.len() as u32;
@@ -859,5 +869,39 @@ mod tests {
             "single-joint submesh should be reassigned from root (0) to owning bone (7)"
         );
         assert_eq!(mesh.submeshes[0].num_indices, 3);
+    }
+
+    /// Soft-skinned submeshes (Constellation `LG_Rear4_Root_Skin`: pistons
+    /// blended across 3-4 bones) have no rigid split, and nothing exports
+    /// skin weights, so leaving them on the root froze the whole leg. They
+    /// are split by each triangle's dominant joint instead.
+    #[test]
+    fn split_assigns_soft_skinned_triangles_to_their_dominant_joint() {
+        let soft = |a: u16, b: u16, c: u16| BoneMap12 { joint_indices: [a, b, c, 0], weights: [130, 76, 49, 0] };
+        let bone_maps = vec![
+            soft(3, 11, 10),
+            soft(3, 10, 11),
+            soft(11, 3, 10), // mixed triangle, majority joint 3
+            soft(2, 3, 0),
+            soft(2, 7, 5),
+            soft(2, 5, 7),
+        ];
+        let submesh = SubMesh {
+            material_name: None,
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 6,
+            first_vertex: 0,
+            num_vertices: 6,
+            node_parent_index: 0,
+        };
+
+        let (submeshes, indices) =
+            split_rigid_weighted_submeshes(&[submesh], &[0, 1, 2, 3, 4, 5], Some(&bone_maps));
+
+        let joints: Vec<u16> = submeshes.iter().map(|s| s.node_parent_index).collect();
+        assert_eq!(joints, [2, 3]);
+        assert_eq!(indices, [3, 4, 5, 0, 1, 2]);
     }
 }

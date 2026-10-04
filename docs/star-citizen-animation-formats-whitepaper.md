@@ -339,12 +339,16 @@ via `BoneMap12`, and groups triangles by joint. The decision rule:
 | Condition                                       | Outcome                                        |
 | ----------------------------------------------- | ---------------------------------------------- |
 | `bone_maps == None`                             | Treat as static; keep `node_parent_index = 0` |
-| `rigid_ratio < 0.9`                             | Soft-skinned; keep original (emit as `skin`)  |
-| `grouped_indices.len() ≥ 1` and `rigid_ratio ≥ 0.9` | Split per-joint; reassign `node_parent_index = joint` for each piece |
+| A vertex has no weighted joint                  | Keep the original submesh                      |
+| `grouped_indices.len() ≥ 1`                     | Split per-joint; reassign `node_parent_index = joint` for each piece |
 
-`rigid_ratio` is the fraction of triangles where all three vertices
-share the same dominant joint. The 0.9 threshold tolerates a few
-mixed-bone triangles at seams without misclassifying.
+Each triangle goes to the dominant joint shared by at least two of its
+vertices (otherwise the first vertex's). Soft-skinned submeshes are split
+the same way rather than kept whole: no export path emits skin weights,
+so a whole soft-skinned submesh would stay frozen at the root (e.g. the
+Constellation's `LG_Rear4_Root_Skin`, whose pistons blend across 3-4
+bones). Blended regions then move rigidly with their dominant bone
+instead of stretching.
 
 After classification, rigid pieces are vertex-rebased into
 their owning bone's local frame (so glTF emission can attach the mesh
