@@ -2039,9 +2039,72 @@ def _fragment_animation_variants(clip: dict[str, Any]) -> list[tuple[str, str, i
         if not display_name:
             display_name = _animation_display_name(clip)
         specificity = len(tags) + len(scopes)
-        dedupe_key = (fragment_name.lower(), "+".join(tag.lower() for tag in frag_tags))
+        dedupe_key = _fragment_selection_key(fragment_name, frag_tags)
         variants.append((_fragment_animation_key(clip_name, index), display_name, specificity, dedupe_key))
     return variants
+
+
+def _fragment_selection_key(fragment_name: str, frag_tags: list[str]) -> tuple[str, str]:
+    """Identity of a Mannequin request: fragment ID plus fragment tags."""
+    return (fragment_name.lower(), "+".join(tag.lower() for tag in frag_tags))
+
+
+def _combine_fragment_scope_options(
+    package: PackageBundle,
+    clip: dict[str, Any],
+    fragment: dict[str, Any],
+) -> dict[str, Any]:
+    """Return ``clip`` merged with the other options CryEngine plays alongside it.
+
+    One Mannequin request (e.g. ``Landing_Gear`` + ``Retract``) is resolved per
+    scope context, so it can play several fragment options at once: on the
+    Constellation the ``Landing_Gear``-tagged option drives the gear legs while
+    an untagged option swings the nacelle that carries them. The UI lists the
+    request once, so selecting it must play every option. Options driving
+    bones already covered are alternatives for the same scope, not companions,
+    and are skipped; so are options playing in the other direction.
+    """
+    fragment_name = str(fragment.get("fragment", "")).strip()
+    frag_tags = _fragment_tags(fragment, "frag_tags")
+    if not fragment_name or not frag_tags:
+        return clip
+    selection_key = _fragment_selection_key(fragment_name, frag_tags)
+    reverse = _effective_fragment_reverse_playback(fragment)
+    bones = dict(clip.get("bones") or {})
+    frame_count = clip.get("frame_count")
+    for other in _animation_clips(package):
+        if other is clip:
+            continue
+        other_fragments = other.get("fragments")
+        if not isinstance(other_fragments, list):
+            continue
+        for other_fragment in other_fragments:
+            if not isinstance(other_fragment, dict):
+                continue
+            other_key = _fragment_selection_key(
+                str(other_fragment.get("fragment", "")).strip(),
+                _fragment_tags(other_fragment, "frag_tags"),
+            )
+            if other_key != selection_key:
+                continue
+            if _effective_fragment_reverse_playback(other_fragment) != reverse:
+                continue
+            _hydrate_animation_clip(package, other)
+            other_bones = other.get("bones")
+            if not isinstance(other_bones, dict) or not other_bones:
+                continue
+            if bones.keys() & other_bones.keys():
+                continue
+            bones.update(other_bones)
+            other_frames = other.get("frame_count")
+            if isinstance(other_frames, (int, float)) and (
+                not isinstance(frame_count, (int, float)) or other_frames > frame_count
+            ):
+                frame_count = other_frames
+            break
+    if len(bones) == len(clip.get("bones") or {}):
+        return clip
+    return {**clip, "bones": bones, "frame_count": frame_count}
 
 
 def _animation_insert_label(animation_name: str | None, clip: dict[str, Any]) -> str:
@@ -3105,7 +3168,7 @@ def _find_animation_selection(package: PackageBundle, animation_name: str) -> tu
             if isinstance(fragments, list) and 0 <= fragment_index < len(fragments):
                 fragment = fragments[fragment_index]
                 if isinstance(fragment, dict):
-                    return clip, fragment
+                    return _combine_fragment_scope_options(package, clip, fragment), fragment
             return clip, None
     for clip in _animation_clips(package):
         if str(clip.get("name", "")).strip() == target:
