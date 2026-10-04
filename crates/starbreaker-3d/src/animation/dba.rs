@@ -218,13 +218,12 @@ fn parse_dba_metadata(data: &[u8]) -> Vec<(String, DbaMetaEntry)> {
         });
     }
 
-    // Names region is preceded by alignment-padding NUL bytes (observed in
-    // Scorpius.dba: 4 leading NULs to align the first name to an 8-byte
-    // boundary). Skip leading NULs so we land on the first real name.
-    let mut pos = entries_end;
-    while pos < data.len() && data[pos] == 0 {
-        pos += 1;
-    }
+    // The names region starts at the next 8-byte boundary. Since
+    // 4 + count*48 is always 4 mod 8 that is 4 pad bytes, which are NUL in
+    // Scorpius.dba but carry stale data in ~44% of shipped DBAs (e.g. the
+    // float 0x3F7ACE02 in constellation.dba), so skip by alignment rather
+    // than by scanning for NULs -- otherwise the first clip loses its name.
+    let mut pos = entries_end.next_multiple_of(8);
 
     let mut names = Vec::with_capacity(count);
     for _ in 0..count {
@@ -265,5 +264,33 @@ mod tests {
 
         let entries = parse_dba_metadata(&data);
         assert!(entries.is_empty());
+    }
+
+    fn metadata_with_padding(padding: [u8; 4]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            let mut entry = [0u8; 48];
+            entry[8..10].copy_from_slice(&30u16.to_le_bytes());
+            data.extend_from_slice(&entry);
+        }
+        data.extend_from_slice(&padding);
+        data.extend_from_slice(b"first.caf\0second.caf\0");
+        data
+    }
+
+    #[test]
+    fn parse_dba_metadata_reads_names_after_zero_alignment_padding() {
+        let entries = parse_dba_metadata(&metadata_with_padding([0; 4]));
+        let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["first.caf", "second.caf"]);
+    }
+
+    #[test]
+    fn parse_dba_metadata_skips_non_zero_alignment_padding() {
+        // constellation.dba carries the float 0x3F7ACE02 in these pad bytes.
+        let entries = parse_dba_metadata(&metadata_with_padding([0x02, 0xCE, 0x7A, 0x3F]));
+        let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["first.caf", "second.caf"]);
     }
 }
