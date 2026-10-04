@@ -6,7 +6,7 @@
 //! (or decomposed writer) with all assembled inputs. Also contains
 //! `assemble_glb_with_loadout` (thin wrapper) and `path_is_shield_related`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use starbreaker_common::progress::{report as report_progress, Progress};
@@ -136,6 +136,12 @@ pub fn assemble_glb_with_loadout_with_progress(
                     (gear_path, bone_name, parent_entity_name.clone())
                 })
         })
+        .collect();
+    let nested_vehicle_names: HashSet<String> = gear_parts
+        .iter()
+        .map(|(_, _, owner)| owner)
+        .filter(|owner| **owner != resolved.entity_name)
+        .cloned()
         .collect();
     let mut child_payloads: Vec<EntityPayload> = Vec::new();
     report_progress(progress, FLATTEN_STAGE_START, "Flattening attachments");
@@ -405,6 +411,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             root_skeleton_source_path,
             root_animation_controller,
             children: child_payloads,
+            nested_vehicle_names,
             interiors: loaded_interiors,
             paint_variants,
         };

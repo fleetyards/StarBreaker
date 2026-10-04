@@ -34,6 +34,7 @@ fn assign_decal_materials_basic() {
         root_bones: vec![],
         root_skeleton_source_path: None,
         root_animation_controller: None,
+        nested_vehicle_names: Default::default(),
         children: vec![],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
@@ -70,6 +71,7 @@ fn assign_decal_materials_no_materials() {
         root_bones: vec![],
         root_skeleton_source_path: None,
         root_animation_controller: None,
+        nested_vehicle_names: Default::default(),
         children: vec![],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
@@ -106,6 +108,7 @@ fn assign_decal_materials_empty_mesh() {
         root_bones: vec![],
         root_skeleton_source_path: None,
         root_animation_controller: None,
+        nested_vehicle_names: Default::default(),
         children: vec![],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
@@ -142,6 +145,7 @@ fn assign_decal_materials_multiple_children() {
         root_bones: vec![],
         root_skeleton_source_path: None,
         root_animation_controller: None,
+        nested_vehicle_names: Default::default(),
         children: vec![
             EntityPayload {
                 entity_name: "child1".to_string(),
@@ -213,6 +217,7 @@ fn assign_decal_materials_with_child_mesh() {
         root_bones: vec![],
         root_skeleton_source_path: None,
         root_animation_controller: None,
+        nested_vehicle_names: Default::default(),
         children: vec![
             EntityPayload {
                 entity_name: "child_with_mesh".to_string(),

@@ -32,6 +32,10 @@ pub(crate) struct DecomposedInput {
     pub root_skeleton_source_path: Option<String>,
     pub root_animation_controller: Option<crate::animation::AnimationControllerSource>,
     pub children: Vec<EntityPayload>,
+    /// Loadout entities other than the root that define their own landing
+    /// gear, i.e. vehicles carried by the root. Their clips are exported in
+    /// a separate namespace (see `child_animation_owner`).
+    pub nested_vehicle_names: HashSet<String>,
     pub interiors: LoadedInteriors,
     /// All available paint variants for this entity, populated from SubGeometry entries.
     pub paint_variants: Vec<crate::mtl::PaintVariant>,
@@ -1552,17 +1556,29 @@ pub(crate) fn write_decomposed_export(
         let mut clips: Vec<serde_json::Value> = Vec::new();
         // Map from clip name → index in `clips`, used to merge same-named clips
         // from different child skeletons (e.g. landing_gear_extend from front/left/right CHRs).
+        // Names are namespaced per owning vehicle first, so a nested vehicle's
+        // clips only merge with each other.
         let mut name_to_index = std::collections::HashMap::<String, usize>::new();
 
-        let mut append_from_skeleton = |skeleton_path: &str, include_unmatched: bool, allow_bone_subset_fallback: bool| {
+        let mut append_from_skeleton = |skeleton_path: &str,
+                                        include_unmatched: bool,
+                                        allow_bone_subset_fallback: bool,
+                                        owner: Option<&str>| {
             match crate::animation::extract_animations_for_skeleton_json(p4k, skeleton_path, include_unmatched, allow_bone_subset_fallback) {
                 Ok(Some(serde_json::Value::Array(values))) => {
                     for mut clip in values {
-                        let name = clip
+                        let raw_name = clip
                             .get("name")
                             .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .unwrap_or("");
+                        let name = if raw_name.is_empty() {
+                            String::new()
+                        } else {
+                            namespaced_clip_name(owner, raw_name)
+                        };
+                        if owner.is_some() && !name.is_empty() {
+                            clip["name"] = serde_json::Value::String(name.clone());
+                        }
                         if name.is_empty() {
                             clips.push(clip);
                         } else if let Some(&existing_idx) = name_to_index.get(&name) {
@@ -1602,11 +1618,13 @@ pub(crate) fn write_decomposed_export(
         };
 
         if let Some(skeleton_path) = input.root_skeleton_source_path.as_deref() {
-            append_from_skeleton(skeleton_path, true, false);
+            append_from_skeleton(skeleton_path, true, false, None);
         }
+        let parent_by_entity = parent_entity_by_name(&input.children);
         for child in &input.children {
             if let Some(skeleton_path) = child.skeleton_source_path.as_deref() {
-                append_from_skeleton(skeleton_path, false, true);
+                let owner = child_animation_owner(child, &parent_by_entity, &input.nested_vehicle_names);
+                append_from_skeleton(skeleton_path, false, true, owner.as_deref());
             }
         }
 
@@ -3109,6 +3127,52 @@ fn string_value_to_json(value: &str) -> serde_json::Value {
     serde_json::json!(value)
 }
 
+/// Map each child entity name to the entity it attaches to (first wins).
+fn parent_entity_by_name(children: &[EntityPayload]) -> HashMap<&str, &str> {
+    let mut parents = HashMap::new();
+    for child in children {
+        parents
+            .entry(child.entity_name.as_str())
+            .or_insert(child.parent_entity_name.as_str());
+    }
+    parents
+}
+
+/// Nested vehicle whose animation namespace a child's clips belong to.
+///
+/// A vehicle carried inside the root (e.g. a docked snub) has its own
+/// Mannequin controller, so clips from its skeleton, its landing gear and
+/// anything attached to it must not merge with the root's same-named clips.
+/// Returns the nearest such vehicle among the child and its attachment
+/// ancestors, or `None` when the child belongs to the root.
+fn child_animation_owner(
+    child: &EntityPayload,
+    parent_by_entity: &HashMap<&str, &str>,
+    nested_vehicles: &HashSet<String>,
+) -> Option<String> {
+    if nested_vehicles.contains(&child.entity_name) {
+        return Some(child.entity_name.clone());
+    }
+    let mut current = child.parent_entity_name.as_str();
+    // Bounded walk: attachment names are not guaranteed to form a tree.
+    for _ in 0..=parent_by_entity.len() {
+        if nested_vehicles.contains(current) {
+            return Some(current.to_string());
+        }
+        current = parent_by_entity.get(current)?;
+    }
+    None
+}
+
+/// Clip name in its owner's namespace: root clips keep their name, nested
+/// vehicle clips are prefixed with the vehicle's entity name.
+fn namespaced_clip_name(owner: Option<&str>, clip_name: &str) -> String {
+    match owner {
+        Some(owner) => format!("{owner}_{clip_name}"),
+        None => clip_name.to_string(),
+    }
+}
+
 fn merge_animation_channel_values(
     existing_value: &mut serde_json::Value,
     incoming_value: serde_json::Value,
@@ -3216,6 +3280,76 @@ mod tests {
 
         let arr = existing.as_array().expect("channel entry should remain an array");
         assert_eq!(arr.len(), 2);
+    }
+
+    fn attached(entity_name: &str, parent_entity_name: &str) -> EntityPayload {
+        EntityPayload {
+            mesh: sample_mesh(vec![]),
+            materials: None,
+            textures: None,
+            nmc: None,
+            palette: None,
+            geometry_path: String::new(),
+            material_path: String::new(),
+            bones: Vec::new(),
+            skeleton_source_path: None,
+            entity_name: entity_name.into(),
+            entity_category: None,
+            attach_def_type: None,
+            parent_node_name: String::new(),
+            parent_entity_name: parent_entity_name.into(),
+            no_rotation: false,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: String::new(),
+        }
+    }
+
+    /// A docked snub's gear clips share names with the carrier's
+    /// (`landing_gear_compress`), but belong to the snub's own Mannequin
+    /// controller and must not merge into the carrier's clip.
+    #[test]
+    fn child_animation_owner_assigns_nested_vehicle_attachments_to_that_vehicle() {
+        let children = vec![
+            attached("LG_Rear1_Root_Skin.cdf", "Carrier"),
+            attached("Snub", "Carrier"),
+            attached("Snub_Landing_Gear_Front.cdf", "Snub"),
+            attached("Snub_Weapon", "Snub"),
+            attached("Snub_Weapon_Barrel", "Snub_Weapon"),
+        ];
+        let nested: HashSet<String> = ["Snub".to_string()].into_iter().collect();
+        let parents = parent_entity_by_name(&children);
+        let owners: Vec<Option<String>> = children
+            .iter()
+            .map(|child| child_animation_owner(child, &parents, &nested))
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                None,
+                Some("Snub".to_string()),
+                Some("Snub".to_string()),
+                Some("Snub".to_string()),
+                Some("Snub".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn child_animation_owner_terminates_on_cyclic_parent_names() {
+        let children = vec![attached("A", "B"), attached("B", "A")];
+        let parents = parent_entity_by_name(&children);
+        assert_eq!(child_animation_owner(&children[0], &parents, &HashSet::new()), None);
+    }
+
+    #[test]
+    fn namespaced_clip_name_prefixes_only_nested_vehicle_clips() {
+        assert_eq!(namespaced_clip_name(None, "landing_gear_compress"), "landing_gear_compress");
+        assert_eq!(
+            namespaced_clip_name(Some("KRIG_P52_Merlin"), "landing_gear_compress"),
+            "KRIG_P52_Merlin_landing_gear_compress"
+        );
     }
 
     fn sample_submaterial() -> SubMaterial {

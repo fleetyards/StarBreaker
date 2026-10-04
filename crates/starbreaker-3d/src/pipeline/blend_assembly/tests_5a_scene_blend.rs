@@ -2071,6 +2071,7 @@ fn create_test_input(
         root_bones: vec![],
         root_skeleton_source_path: None,
         root_animation_controller: None,
+        nested_vehicle_names: Default::default(),
         children,
         interiors: LoadedInteriors {
             unique_cgfs: vec![],
