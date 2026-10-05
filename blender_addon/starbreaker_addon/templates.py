@@ -63,22 +63,45 @@ def alpha_test_threshold(submaterial: SubmaterialRecord) -> float | None:
     flags = submaterial.decoded_feature_flags
     if submaterial.shader_family == "MeshDecal" or flags.has_decal or flags.has_stencil_map:
         return None
+    value = _authored_float(submaterial, "AlphaTest")
+    return value if value is not None and value > 0.0 else None
+
+
+def _authored_float(submaterial: SubmaterialRecord, name: str) -> float | None:
     for attribute in submaterial.raw.get("authored_attributes", []):
-        if attribute.get("name") != "AlphaTest":
+        if attribute.get("name") != name:
             continue
         try:
-            value = float(attribute.get("value"))
+            return float(attribute.get("value"))
         except (TypeError, ValueError):
             return None
-        return value if value > 0.0 else None
     return None
+
+
+def _is_opaque_surface(submaterial: SubmaterialRecord) -> bool:
+    """Non-decal surface with no alpha test and full ``Opacity``.
+
+    CryEngine draws such a surface opaque whatever its diffuse alpha holds,
+    e.g. the Star Runner's ``Ext_Damage_Pom`` hull panels: a POM material
+    whose diffuse alpha is not opacity. Blending it made the hull see-through.
+    """
+    flags = submaterial.decoded_feature_flags
+    if submaterial.shader_family == "MeshDecal" or flags.has_decal or flags.has_stencil_map:
+        return False
+    if alpha_test_threshold(submaterial) is not None:
+        return False
+    opacity = _authored_float(submaterial, "Opacity")
+    return opacity is None or opacity >= 1.0 - 1e-4
 
 
 def template_plan_for_submaterial(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     plan = _base_template_plan(submaterial)
-    if plan.uses_alpha and plan.blend_method == "BLEND" and alpha_test_threshold(submaterial) is not None:
-        # Alpha-tested: hard cut-out, not a translucent blend.
-        return replace(plan, blend_method="CLIP")
+    if plan.uses_alpha and plan.blend_method == "BLEND":
+        if alpha_test_threshold(submaterial) is not None:
+            # Alpha-tested: hard cut-out, not a translucent blend.
+            return replace(plan, blend_method="CLIP")
+        if plan.template_key == "parallax_pom" and _is_opaque_surface(submaterial):
+            return replace(plan, blend_method="OPAQUE", uses_alpha=False)
     return plan
 
 

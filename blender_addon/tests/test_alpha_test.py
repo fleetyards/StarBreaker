@@ -46,10 +46,26 @@ class AlphaTestTests(unittest.TestCase):
         self.assertEqual(plan.blend_method, "CLIP")
         self.assertTrue(plan.uses_alpha)
 
-    def test_pom_surface_without_alpha_test_keeps_blending(self) -> None:
-        trim = _submaterial("Illum", _GRATE_MASK, "0")
-        self.assertIsNone(alpha_test_threshold(trim))
-        self.assertEqual(template_plan_for_submaterial(trim).blend_method, "BLEND")
+    def test_opaque_pom_surface_renders_opaque(self) -> None:
+        # Star Runner Ext_Damage_Pom: an opaque POM hull panel showing
+        # structure. Alpha-blending it by its diffuse alpha made the hull
+        # see-through into the ship.
+        damage = _submaterial("HardSurface", "%PARALLAX_OCCLUSION_MAPPING%USE_SPECULAR_MAPS", None)
+        plan = template_plan_for_submaterial(damage)
+        self.assertEqual(plan.template_key, "parallax_pom")
+        self.assertEqual(plan.blend_method, "OPAQUE")
+        self.assertFalse(plan.uses_alpha)
+
+    def test_pom_decals_keep_their_alpha(self) -> None:
+        pom_decal = _submaterial("Illum", "%DECAL%PARALLAX_OCCLUSION_MAPPING", None)
+        plan = template_plan_for_submaterial(pom_decal)
+        self.assertEqual(plan.template_key, "decal_stencil")
+        self.assertTrue(plan.uses_alpha)
+
+    def test_translucent_pom_surface_keeps_blending(self) -> None:
+        translucent = _submaterial("Illum", _GRATE_MASK, None)
+        translucent.raw["authored_attributes"].append({"name": "Opacity", "value": "0.5"})
+        self.assertEqual(template_plan_for_submaterial(translucent).blend_method, "BLEND")
 
     def test_decals_keep_blending_over_their_host(self) -> None:
         pom_decal = _submaterial("Illum", "%DECAL%PARALLAX_OCCLUSION_MAPPING", "0.5")
