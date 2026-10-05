@@ -58,6 +58,7 @@ from ..record_utils import (
     _uses_vertex_color_tint,
     _layer_texture_reference,
     _mesh_decal_authored_emission_strength,
+    _mesh_decal_diffuse_multipliers,
     _matching_texture_reference,
     _mean_triplet,
     _public_param_triplet,
@@ -640,7 +641,45 @@ class MaterialsMixin:
         self._configure_material(material, blend_method=plan.blend_method, shadow_method=plan.shadow_method)
         return True
 
+    def _scaled_mesh_decal_source(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        submaterial: SubmaterialRecord,
+        group_contract: ShaderGroupContract,
+        contract_input: ContractInput,
+        source_socket: bpy.types.NodeSocket,
+        *,
+        x: int,
+        y: int,
+    ) -> bpy.types.NodeSocket:
+        """Scale a diffuse decal's own texture by its authored Diffuse/Opacity.
 
+        See ``_mesh_decal_diffuse_multipliers``; returns ``source_socket``
+        unchanged when the factors are neutral or do not apply.
+        """
+        if group_contract.name != "SB_MeshDecal_v1":
+            return source_socket
+        colour, opacity = _mesh_decal_diffuse_multipliers(submaterial)
+        if contract_input.name == "TexSlot1_DecalSource" and colour is not None:
+            multiply = nodes.new("ShaderNodeMix")
+            multiply.data_type = "RGBA"
+            multiply.blend_type = "MULTIPLY"
+            multiply.label = "Authored Diffuse"
+            multiply.location = (x, y)
+            multiply.inputs[0].default_value = 1.0
+            links.new(source_socket, multiply.inputs[6])
+            multiply.inputs[7].default_value = (colour[0], colour[1], colour[2], 1.0)
+            return multiply.outputs[2]
+        if contract_input.name == "TexSlot1_DecalSource_alpha" and opacity is not None:
+            multiply = nodes.new("ShaderNodeMath")
+            multiply.operation = "MULTIPLY"
+            multiply.label = "Authored Opacity"
+            multiply.location = (x, y)
+            links.new(source_socket, multiply.inputs[0])
+            multiply.inputs[1].default_value = opacity
+            return multiply.outputs[0]
+        return source_socket
 
     def _contract_input_source_socket(
         self,

@@ -917,6 +917,17 @@ class BuildersMixin:
                     x=-220,
                     y=y,
                 )
+                if source_socket is not None:
+                    source_socket = self._scaled_mesh_decal_source(
+                        nodes,
+                        links,
+                        submaterial,
+                        group_contract,
+                        contract_input,
+                        source_socket,
+                        x=-60,
+                        y=y,
+                    )
             if source_socket is not None:
                 links.new(source_socket, target_socket)
             else:

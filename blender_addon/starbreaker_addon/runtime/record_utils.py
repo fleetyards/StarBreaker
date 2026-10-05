@@ -318,6 +318,42 @@ def _mesh_decal_authored_emission_strength(
     return 0.0
 
 
+def _mesh_decal_diffuse_multipliers(
+    submaterial: SubmaterialRecord,
+) -> tuple[tuple[float, float, float] | None, float | None]:
+    """Authored ``Diffuse`` colour and ``Opacity`` that scale a diffuse decal.
+
+    CryEngine multiplies a decal's own diffuse map by the material's
+    ``Diffuse`` colour and its alpha by ``Opacity``. Without them a faint
+    near-black grime decal (Star Runner ``Ext_Dirt_Decals``: Diffuse 0.023,
+    Opacity 0.17) renders its texture times its vertex colours at full
+    strength -- bright blue streaks where the vertex colour is blue.
+
+    Only decals that draw their own diffuse map qualify: stencil decals take
+    their colour from the tint palette and author unrelated ``Diffuse``
+    values. ``Opacity`` is skipped for alpha-tested decals
+    (``DISABLE_ALPHA_BLEND``). Returns ``None`` for neutral factors.
+    """
+    if submaterial.shader_family != "MeshDecal" or submaterial.decoded_feature_flags.has_stencil_map:
+        return None, None
+    string_gen_mask = (_authored_attribute_string(submaterial, "StringGenMask") or "").upper()
+    if "DIFFUSE_MAP" not in string_gen_mask or "STENCIL_MAP" in string_gen_mask:
+        return None, None
+    colour = _authored_attribute_triplet(submaterial, "Diffuse")
+    if colour is not None and all(abs(channel - 1.0) < 1e-4 for channel in colour):
+        colour = None
+    opacity: float | None = None
+    if "DISABLE_ALPHA_BLEND" not in string_gen_mask:
+        raw_opacity = _authored_attribute_string(submaterial, "Opacity")
+        try:
+            opacity = float(raw_opacity) if raw_opacity is not None else None
+        except ValueError:
+            opacity = None
+        if opacity is not None and opacity >= 1.0 - 1e-4:
+            opacity = None
+    return colour, opacity
+
+
 def _hard_surface_angle_shift_enabled(submaterial: SubmaterialRecord) -> bool:
     if submaterial.decoded_feature_flags.has_iridescence:
         return True
