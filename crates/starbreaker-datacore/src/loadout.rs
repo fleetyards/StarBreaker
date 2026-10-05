@@ -561,9 +561,20 @@ fn best_sub_geometry_variant_match<'a>(
     variants: &'a [SubGeometryVariant],
     selector: &str,
 ) -> Option<&'a SubGeometryVariant> {
-    let selector_token_set: HashSet<String> = selector_tokens(selector).into_iter().collect();
-    if selector_token_set.is_empty() {
+    let tokens = selector_tokens(selector);
+    if tokens.is_empty() {
         return None;
+    }
+    // Tags and port names disagree on word separators: the Andromeda's retro
+    // thrusters tag `topleft` for port `hardpoint_retro_top_left`. Also accept
+    // every run of consecutive selector words joined together.
+    let mut selector_token_set: HashSet<String> = HashSet::new();
+    for start in 0..tokens.len() {
+        let mut joined = String::new();
+        for token in &tokens[start..] {
+            joined.push_str(token);
+            selector_token_set.insert(joined.clone());
+        }
     }
 
     variants
@@ -833,6 +844,33 @@ mod tests {
             matched.geometry_path,
             "Objects/Ships/Vulture/Front_Right.cga"
         );
+    }
+
+    /// The Andromeda's retro thrusters tag their variants `topleft`,
+    /// `bottomright`, ... while the ports spell `hardpoint_retro_top_left`.
+    /// Without a match the unclaimed-variant fallback handed out the meshes
+    /// in variant order and put every thruster on the wrong hardpoint.
+    #[test]
+    fn match_sub_geometry_variant_joins_separated_port_words() {
+        let variants: Vec<SubGeometryVariant> = ["topleft", "topright", "bottomleft", "bottomright"]
+            .iter()
+            .map(|tag| SubGeometryVariant {
+                tag: tag.to_string(),
+                geometry_path: format!("objects/retro_{tag}.cga"),
+                material_path: String::new(),
+            })
+            .collect();
+
+        for (port, tag) in [
+            ("hardpoint_retro_top_left", "topleft"),
+            ("hardpoint_retro_top_right", "topright"),
+            ("hardpoint_retro_bottom_left", "bottomleft"),
+            ("hardpoint_retro_bottom_right", "bottomright"),
+        ] {
+            let matched = match_sub_geometry_variant(&variants, "", None, port)
+                .unwrap_or_else(|| panic!("{port} should match a variant"));
+            assert_eq!(matched.tag, tag, "{port}");
+        }
     }
 
     #[test]
