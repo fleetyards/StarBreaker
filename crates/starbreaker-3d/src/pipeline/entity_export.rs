@@ -494,6 +494,7 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
     let source_normals = mesh.normals.clone();
     let source_tangents = mesh.tangents.clone();
     let source_colors = mesh.colors.clone();
+    let source_skin_weights = mesh.skin_weights.clone();
     let source_indices = mesh.indices.clone();
     let source_submeshes = mesh.submeshes.clone();
 
@@ -503,6 +504,7 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
     let mut rebuilt_normals = source_normals.as_ref().map(|_| Vec::new());
     let mut rebuilt_tangents = source_tangents.as_ref().map(|_| Vec::new());
     let mut rebuilt_colors = source_colors.as_ref().map(|_| Vec::new());
+    let mut rebuilt_skin_weights = source_skin_weights.as_ref().map(|_| Vec::new());
     let mut rebuilt_indices = Vec::new();
     let mut rebuilt_submeshes = Vec::with_capacity(source_submeshes.len());
 
@@ -552,6 +554,9 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
                 if let (Some(source), Some(target)) = (&source_colors, rebuilt_colors.as_mut()) {
                     target.push(source[source_vertex]);
                 }
+                if let (Some(source), Some(target)) = (&source_skin_weights, rebuilt_skin_weights.as_mut()) {
+                    target.push(source[source_vertex]);
+                }
 
                 remap.insert(*source_index, new_index);
                 new_index
@@ -582,6 +587,7 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
     mesh.normals = rebuilt_normals;
     mesh.tangents = rebuilt_tangents;
     mesh.colors = rebuilt_colors;
+    mesh.skin_weights = rebuilt_skin_weights;
     mesh.indices = rebuilt_indices;
     mesh.submeshes = rebuilt_submeshes;
     if !mesh.positions.is_empty() {
@@ -878,6 +884,7 @@ mod tests {
             model_max: [-0.269, 0.161, -0.295],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin_weights: None,
         }
     }
 
@@ -963,6 +970,7 @@ mod tests {
             model_max: [0.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [0.0; 3],
+            skin_weights: None,
         };
 
         assert!(mesh_material_ids_fit_material_count(&mesh, 3));

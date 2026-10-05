@@ -1962,6 +1962,7 @@ fn empty_anchor_mesh() -> Mesh {
         model_max: [0.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [0.0; 3],
+        skin_weights: None,
     }
 }
 
@@ -2606,6 +2607,45 @@ fn patch_object_parent_transform(
     }
 }
 
+/// Weighted vertex groups for a mesh's soft-skinned vertices: one group per
+/// joint, named after the joint's skeleton node so the Blender addon can bind
+/// it to that bone's scene object. Empty for meshes without skin weights.
+fn skin_vertex_groups(mesh: &Mesh, nmc: &NodeMeshCombo) -> Vec<VertexGroup> {
+    let Some(skin_weights) = mesh.skin_weights.as_ref() else {
+        return Vec::new();
+    };
+    let mut by_joint = std::collections::BTreeMap::<u16, (Vec<usize>, Vec<f32>)>::new();
+    for (vertex, bone_map) in skin_weights.iter().enumerate().take(mesh.positions.len()) {
+        for (joint, weight) in bone_map.joint_indices.iter().zip(bone_map.weights) {
+            if weight == 0 {
+                continue;
+            }
+            let (vertices, weights) = by_joint.entry(*joint).or_default();
+            let weight = f32::from(weight) / 255.0;
+            // A bone map may name the same joint in two slots; sum them.
+            if vertices.last() == Some(&vertex) {
+                if let Some(last) = weights.last_mut() {
+                    *last += weight;
+                }
+            } else {
+                vertices.push(vertex);
+                weights.push(weight);
+            }
+        }
+    }
+    by_joint
+        .into_iter()
+        .filter_map(|(joint, (vertex_indices, weights))| {
+            let node = nmc.nodes.get(joint as usize)?;
+            Some(VertexGroup {
+                name: node.name.clone(),
+                vertex_indices,
+                weights: Some(weights),
+            })
+        })
+        .collect()
+}
+
 fn remap_vertex_groups(
     vertex_groups: Option<&Vec<VertexGroup>>,
     old_to_new: &HashMap<u32, u32>,
@@ -2614,19 +2654,29 @@ fn remap_vertex_groups(
     let remapped = groups
         .iter()
         .filter_map(|group| {
-            let mut vertex_indices = group
+            let mut entries = group
                 .vertex_indices
                 .iter()
-                .filter_map(|old| old_to_new.get(&(*old as u32)).copied().map(|new| new as usize))
+                .enumerate()
+                .filter_map(|(slot, old)| {
+                    let new = old_to_new.get(&(*old as u32)).copied()? as usize;
+                    let weight = group.weights.as_ref().and_then(|weights| weights.get(slot).copied());
+                    Some((new, weight))
+                })
                 .collect::<Vec<_>>();
-            vertex_indices.sort_unstable();
-            vertex_indices.dedup();
-            if vertex_indices.is_empty() {
+            entries.sort_unstable_by_key(|(new, _)| *new);
+            entries.dedup_by_key(|(new, _)| *new);
+            if entries.is_empty() {
                 None
             } else {
+                let weights = group
+                    .weights
+                    .as_ref()
+                    .map(|_| entries.iter().map(|(_, weight)| weight.unwrap_or(1.0)).collect());
                 Some(VertexGroup {
                     name: group.name.clone(),
-                    vertex_indices,
+                    vertex_indices: entries.into_iter().map(|(new, _)| new).collect(),
+                    weights,
                 })
             }
         })
@@ -2646,6 +2696,7 @@ fn subset_mesh_for_submeshes(
     let mut normals = mesh.normals.as_ref().map(|_| Vec::new());
     let mut tangents = mesh.tangents.as_ref().map(|_| Vec::new());
     let mut colors = mesh.colors.as_ref().map(|_| Vec::new());
+    let mut skin_weights = mesh.skin_weights.as_ref().map(|_| Vec::new());
     let mut indices = Vec::new();
     let mut submeshes = Vec::new();
 
@@ -2677,6 +2728,9 @@ fn subset_mesh_for_submeshes(
                 }
                 if let (Some(src), Some(dst)) = (mesh.colors.as_ref(), colors.as_mut()) {
                     dst.push(src.get(old).copied().unwrap_or([255, 255, 255, 255]));
+                }
+                if let (Some(src), Some(dst)) = (mesh.skin_weights.as_ref(), skin_weights.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or(crate::ivo::skin::BoneMap12 { joint_indices: [0; 4], weights: [0; 4] }));
                 }
                 old_to_new.insert(old_index, new_index);
                 new_index
@@ -2735,6 +2789,7 @@ fn subset_mesh_for_submeshes(
             model_max,
             scaling_min: mesh.scaling_min,
             scaling_max: mesh.scaling_max,
+            skin_weights,
         },
         vertex_groups,
     )
@@ -3081,14 +3136,16 @@ fn write_mesh_block(
         if let Some((mdv_array_ptr, mdv_data_ptr)) = block.mdeformvert_ptrs.first().copied() {
             let mut mdeformvert_data = Vec::with_capacity(block.totvert);
             let mut weight_payloads = Vec::new();
-            for vert_idx in 0..block.totvert {
-                let weights_for_vert = vgroups
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(group_idx, vgroup)| {
-                        vgroup.vertex_indices.contains(&vert_idx).then_some((group_idx as u32, 1.0f32))
-                    })
-                    .collect::<Vec<_>>();
+            let mut weights_by_vertex: Vec<Vec<(u32, f32)>> = vec![Vec::new(); block.totvert];
+            for (group_idx, vgroup) in vgroups.iter().enumerate() {
+                for (slot, vert_idx) in vgroup.vertex_indices.iter().enumerate() {
+                    let weight = vgroup.weights.as_ref().and_then(|weights| weights.get(slot).copied()).unwrap_or(1.0);
+                    if let Some(entries) = weights_by_vertex.get_mut(*vert_idx) {
+                        entries.push((group_idx as u32, weight));
+                    }
+                }
+            }
+            for (vert_idx, weights_for_vert) in weights_by_vertex.into_iter().enumerate() {
                 let weight_ptr = if weights_for_vert.is_empty() { 0 } else { block.mdeformweight_ptrs[vert_idx] };
                 mdeformvert_data.push((weight_ptr, weights_for_vert.len() as u32));
                 if !weights_for_vert.is_empty() {
@@ -3135,9 +3192,13 @@ fn mesh_to_blend_hierarchy(
         if submesh_indices.is_empty() {
             continue;
         }
-        let (node_mesh, node_vertex_groups) = subset_mesh_for_submeshes(mesh, submesh_indices, vertex_groups);
+        let (node_mesh, mut node_vertex_groups) = subset_mesh_for_submeshes(mesh, submesh_indices, vertex_groups);
         if node_mesh.indices.is_empty() {
             continue;
+        }
+        let skin_groups = skin_vertex_groups(&node_mesh, nmc);
+        if !skin_groups.is_empty() {
+            node_vertex_groups.get_or_insert_with(Vec::new).extend(skin_groups);
         }
         mesh_objects[node_index] = Some(MeshObjectExport {
             name: nmc_export_names[node_index].clone(),
@@ -5881,6 +5942,8 @@ pub struct VertexGroup {
     pub name: String,
     /// Indices of vertices in the group
     pub vertex_indices: Vec<usize>,
+    /// Weight per entry of `vertex_indices`; `None` means every weight is 1.0.
+    pub weights: Option<Vec<f32>>,
 }
 
 /// Mesh with vertex groups ready to write
@@ -5957,6 +6020,7 @@ pub fn collect_decal_vertices(
     let decal_vgroup = VertexGroup {
         name: DECAL_OFFSET_GROUP_NAME.to_string(),
         vertex_indices,
+        weights: None,
     };
     
     // Fix Phase 4B bug: total_vertices should be max(corner_verts) + 1, not len(corner_verts)

@@ -333,6 +333,7 @@ mod tests {
             model_max: [1.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin_weights: None,
         }
     }
 
@@ -2097,6 +2098,7 @@ mod tests {
             model_max: [3.0, 1.0, 0.0],
             scaling_min: [0.0; 3],
             scaling_max: [3.0, 1.0, 0.0],
+            skin_weights: None,
             submeshes: vec![
                 SubMesh {
                     material_name: Some("mat_a".into()),
@@ -2225,6 +2227,7 @@ mod tests {
             model_max: [1.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin_weights: None,
             submeshes: vec![SubMesh {
                 material_name: None,
                 material_id: 0,

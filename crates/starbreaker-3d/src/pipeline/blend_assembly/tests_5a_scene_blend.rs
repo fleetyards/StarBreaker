@@ -126,6 +126,7 @@ fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
         model_max: [1.0, 1.0, 1.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 1.0],
+        skin_weights: None,
     }
 }
 
@@ -168,6 +169,7 @@ fn mesh_to_blend_exports_secondary_uv_map() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
 
     let bytes = mesh_to_blend("uv_test", &mesh, &None, None, None);
@@ -231,6 +233,7 @@ fn mesh_to_blend_exports_decal_offset_displace_modifier_for_decal_vertex_group()
     let vertex_groups = vec![VertexGroup {
         name: DECAL_OFFSET_GROUP_NAME.to_string(),
         vertex_indices: vec![0, 1, 2],
+        weights: None,
     }];
 
     let bytes = mesh_to_blend("decal_mesh", &mesh, &None, None, Some(&vertex_groups));
@@ -263,6 +266,7 @@ fn flat_mesh_assets_bake_root_rotation_without_wrappers() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
 
     let blend_bytes = mesh_to_blend("flat_asset", &mesh, &None, None, None);
@@ -431,6 +435,7 @@ fn interior_placement_mesh_geometry_converts_to_scene_axes() {
         model_max: [1.0, 2.0, 3.0],
         scaling_min: [1.0, 2.0, 3.0],
         scaling_max: [1.0, 2.0, 3.0],
+        skin_weights: None,
     };
 
     convert_mesh_geometry_to_scene_axes(&mut mesh);
@@ -457,6 +462,7 @@ fn interior_placement_assets_flatten_source_hierarchy() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
     let nmc = NodeMeshCombo {
         nodes: vec![crate::nmc::NmcNode {
@@ -522,6 +528,7 @@ fn existing_native_blend_asset_is_reused_when_present() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
     let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
         "existing_asset",
@@ -576,6 +583,7 @@ fn missing_mesh_payload_reuses_existing_native_blend_asset() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
     let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
         "existing_asset",
@@ -668,6 +676,7 @@ fn test_mesh_blend_with_nmc_writes_hierarchy_objects() {
         model_max: [3.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [3.0, 1.0, 0.0],
+        skin_weights: None,
     };
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -839,6 +848,7 @@ fn collapsed_wrapper_node_preserves_non_identity_root_transform() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -929,6 +939,7 @@ fn linked_scene_object_names_use_geometry_nodes_for_nmc_assets() {
         model_max: [1.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [1.0; 3],
+        skin_weights: None,
     };
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -2032,6 +2043,7 @@ fn create_test_input(
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin_weights: None,
     };
 
     let mut children = Vec::new();

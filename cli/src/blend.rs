@@ -336,6 +336,7 @@ pub(crate) fn create_master_blend(entity_name: &str) -> Vec<u8> {
         model_max: [0.001, 0.001, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [0.001, 0.001, 0.0],
+        skin_weights: None,
     };
 
     mesh_to_blend(entity_name, &placeholder)

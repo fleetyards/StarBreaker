@@ -139,6 +139,7 @@ fn empty_scene_graph_mesh() -> Mesh {
         model_max: [0.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [0.0; 3],
+        skin_weights: None,
     }
 }
 
@@ -3510,6 +3511,7 @@ mod tests {
             model_max: [0.0, 0.0, 0.0],
             scaling_min: [0.0, 0.0, 0.0],
             scaling_max: [0.0, 0.0, 0.0],
+            skin_weights: None,
         }
     }
 
@@ -4683,6 +4685,7 @@ mod tests {
             model_max: [0.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [0.0; 3],
+            skin_weights: None,
         }
     }
 

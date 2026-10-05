@@ -54,6 +54,7 @@ from .animation_fps import (
     describe_reconciliation,
     reconcile_animation_fps,
 )
+from .skinning import ensure_skin_rigs
 from .validators import (
     _purge_orphaned_file_backed_images,
     _purge_orphaned_managed_materials,
@@ -2857,6 +2858,14 @@ def apply_animation_mode_to_package_root(
 ) -> int:
     """Apply one animation in one of: none, snap_first, snap_last, action."""
     package = _load_package_from_root(package_root)
+    # Soft-skinned meshes deform through a rig that follows the bone objects;
+    # build it before the first pose so every mode below drives it.
+    ensure_skin_rigs(
+        context,
+        _iter_package_objects(package_root),
+        _object_source_name_candidates,
+        _bind_pose_payload,
+    )
     selection = _find_animation_selection(package, animation_name)
     if selection is None:
         raise RuntimeError(f"Animation '{animation_name}' not found in package sidecar")

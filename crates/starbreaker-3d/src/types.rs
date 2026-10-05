@@ -19,6 +19,10 @@ pub struct Mesh {
     /// Scaling bounding box (second bbox from MeshInfo, used for dequantization).
     pub scaling_min: [f32; 3],
     pub scaling_max: [f32; 3],
+    /// Per-vertex joint weights of soft-skinned geometry, indexed like
+    /// `positions`; joints are skeleton node indices. Vertices with all-zero
+    /// weights are rigid. `None` when the mesh has no soft-skinned submesh.
+    pub skin_weights: Option<Vec<crate::ivo::skin::BoneMap12>>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +82,18 @@ impl Mesh {
                 let mut padded = vec![[255u8, 255, 255, 255]; vertex_offset as usize];
                 padded.extend(b);
                 self.colors = Some(padded);
+            }
+            (None, None) => {}
+        }
+        // Skin weights: pad the side without any with rigid (zero) weights.
+        let unweighted = crate::ivo::skin::BoneMap12 { joint_indices: [0; 4], weights: [0; 4] };
+        match (&mut self.skin_weights, other.skin_weights) {
+            (Some(a), Some(b)) => a.extend(b),
+            (Some(a), None) => a.resize(self.positions.len(), unweighted),
+            (None, Some(b)) => {
+                let mut padded = vec![unweighted; vertex_offset as usize];
+                padded.extend(b);
+                self.skin_weights = Some(padded);
             }
             (None, None) => {}
         }
@@ -141,17 +157,23 @@ fn compute_smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 
     norms
 }
 
+/// Split rigidly weighted submeshes into one submesh per joint.
+///
+/// Returns the rebuilt submeshes, their indices, and per rebuilt submesh
+/// whether it was kept whole because it is soft-skinned (its vertices blend
+/// several joints and need skin weights to deform).
 fn split_rigid_weighted_submeshes(
     submeshes: &[SubMesh],
     indices: &[u32],
     bone_maps: Option<&[crate::ivo::skin::BoneMap12]>,
-) -> (Vec<SubMesh>, Vec<u32>) {
+) -> (Vec<SubMesh>, Vec<u32>, Vec<bool>) {
     let Some(bone_maps) = bone_maps else {
-        return (submeshes.to_vec(), indices.to_vec());
+        return (submeshes.to_vec(), indices.to_vec(), vec![false; submeshes.len()]);
     };
 
     let mut rebuilt_submeshes = Vec::with_capacity(submeshes.len());
     let mut rebuilt_indices = Vec::with_capacity(indices.len());
+    let mut soft_skinned = Vec::with_capacity(submeshes.len());
 
     for submesh in submeshes {
         let start = submesh.first_index as usize;
@@ -165,6 +187,7 @@ fn split_rigid_weighted_submeshes(
             original.num_indices = source_indices.len() as u32;
             rebuilt_indices.extend_from_slice(source_indices);
             rebuilt_submeshes.push(original);
+            soft_skinned.push(false);
             continue;
         }
 
@@ -221,25 +244,22 @@ fn split_rigid_weighted_submeshes(
         // still be reassigned to that joint, otherwise it stays static
         // at the CHR root while its owning bone animates. The split loop
         // below handles len == 1 correctly (it just emits one rebuilt
-        // submesh with `node_parent_index = joint`).
+        // submesh with `node_parent_index = joint`); only `!valid` and
+        // `rigid_ratio < 0.9` keep the submesh whole.
         //
-        // Soft-skinned submeshes (few triangles share one dominant joint)
-        // are split the same way: no export path emits skin weights, so
-        // keeping them whole left them frozen at the root -- e.g. the
-        // Constellation's rear landing-gear leg, whose pistons blend across
-        // 3-4 bones, never retracted. Per-joint pieces follow their bones
-        // rigidly; blended regions move without stretching. Only an
-        // unmapped vertex (`!valid`) keeps the submesh whole.
-        log::trace!(
-            "skin submesh: {rigid_triangles}/{triangle_count} rigid triangles across {} joints",
-            grouped_indices.len()
-        );
-        if !valid || grouped_indices.is_empty() {
+        // A soft-skinned submesh (e.g. the Constellation's rear landing-gear
+        // leg, whose telescoping pistons blend across 3-4 bones) cannot be
+        // cut into rigid pieces without the pistons poking out, so it stays
+        // whole and is flagged; `build_mesh` then keeps its skin weights for
+        // the exporter to emit as weighted vertex groups.
+        let rigid_ratio = rigid_triangles as f32 / triangle_count as f32;
+        if !valid || grouped_indices.is_empty() || rigid_ratio < 0.9 {
             let mut original = submesh.clone();
             original.first_index = rebuilt_indices.len() as u32;
             original.num_indices = source_indices.len() as u32;
             rebuilt_indices.extend_from_slice(source_indices);
             rebuilt_submeshes.push(original);
+            soft_skinned.push(valid && !grouped_indices.is_empty());
             continue;
         }
 
@@ -250,10 +270,51 @@ fn split_rigid_weighted_submeshes(
             split.node_parent_index = joint;
             rebuilt_indices.extend_from_slice(&joint_indices);
             rebuilt_submeshes.push(split);
+            soft_skinned.push(false);
         }
     }
 
-    (rebuilt_submeshes, rebuilt_indices)
+    (rebuilt_submeshes, rebuilt_indices, soft_skinned)
+}
+
+/// Per-vertex skin weights for the vertices of soft-skinned submeshes.
+///
+/// Vertices drawn by any rigid submesh keep zero weights: rigid geometry
+/// already follows its bone through the scene hierarchy and must not be
+/// deformed a second time. Returns `None` when nothing is soft-skinned.
+fn soft_skin_weights(
+    submeshes: &[SubMesh],
+    indices: &[u32],
+    soft_skinned: &[bool],
+    bone_maps: Option<&[crate::ivo::skin::BoneMap12]>,
+    vertex_count: usize,
+) -> Option<Vec<crate::ivo::skin::BoneMap12>> {
+    let bone_maps = bone_maps?;
+    if !soft_skinned.iter().any(|soft| *soft) {
+        return None;
+    }
+    let unweighted = crate::ivo::skin::BoneMap12 { joint_indices: [0; 4], weights: [0; 4] };
+    let mut weights = vec![unweighted; vertex_count];
+    let submesh_vertices = |submesh: &SubMesh| {
+        let start = submesh.first_index as usize;
+        let end = (start + submesh.num_indices as usize).min(indices.len());
+        indices[start..end].iter().map(|index| *index as usize)
+    };
+    for (submesh, _) in submeshes.iter().zip(soft_skinned).filter(|(_, soft)| **soft) {
+        for vertex in submesh_vertices(submesh) {
+            if let (Some(slot), Some(map)) = (weights.get_mut(vertex), bone_maps.get(vertex)) {
+                *slot = *map;
+            }
+        }
+    }
+    for (submesh, _) in submeshes.iter().zip(soft_skinned).filter(|(_, soft)| !**soft) {
+        for vertex in submesh_vertices(submesh) {
+            if let Some(slot) = weights.get_mut(vertex) {
+                *slot = unweighted;
+            }
+        }
+    }
+    Some(weights)
 }
 
 pub fn build_mesh(skin: &SkinMesh, materials: &[MaterialName]) -> Mesh {
@@ -328,10 +389,17 @@ pub fn build_mesh_with_bbox(skin: &SkinMesh, materials: &[MaterialName], use_mod
         }
     }
 
-    let (submeshes, indices) = split_rigid_weighted_submeshes(
+    let (submeshes, indices, soft_skinned) = split_rigid_weighted_submeshes(
         &submeshes,
         &indices,
         skin.streams.bone_maps.as_deref(),
+    );
+    let skin_weights = soft_skin_weights(
+        &submeshes,
+        &indices,
+        &soft_skinned,
+        skin.streams.bone_maps.as_deref(),
+        positions.len(),
     );
 
     // Decode normals and tangents from stream data.
@@ -382,6 +450,7 @@ pub fn build_mesh_with_bbox(skin: &SkinMesh, materials: &[MaterialName], use_mod
         model_max: skin.info.model_max,
         scaling_min: skin.info.min_bound,
         scaling_max: skin.info.max_bound,
+        skin_weights,
     }
 }
 
@@ -871,37 +940,67 @@ mod tests {
         assert_eq!(mesh.submeshes[0].num_indices, 3);
     }
 
-    /// Soft-skinned submeshes (Constellation `LG_Rear4_Root_Skin`: pistons
-    /// blended across 3-4 bones) have no rigid split, and nothing exports
-    /// skin weights, so leaving them on the root froze the whole leg. They
-    /// are split by each triangle's dominant joint instead.
-    #[test]
-    fn split_assigns_soft_skinned_triangles_to_their_dominant_joint() {
-        let soft = |a: u16, b: u16, c: u16| BoneMap12 { joint_indices: [a, b, c, 0], weights: [130, 76, 49, 0] };
-        let bone_maps = vec![
-            soft(3, 11, 10),
-            soft(3, 10, 11),
-            soft(11, 3, 10), // mixed triangle, majority joint 3
-            soft(2, 3, 0),
-            soft(2, 7, 5),
-            soft(2, 5, 7),
-        ];
-        let submesh = SubMesh {
+    fn submesh(first_index: u32, num_indices: u32) -> SubMesh {
+        SubMesh {
             material_name: None,
             material_id: 0,
             source_material_id: None,
-            first_index: 0,
-            num_indices: 6,
+            first_index,
+            num_indices,
             first_vertex: 0,
-            num_vertices: 6,
+            num_vertices: 0,
             node_parent_index: 0,
-        };
+        }
+    }
 
-        let (submeshes, indices) =
-            split_rigid_weighted_submeshes(&[submesh], &[0, 1, 2, 3, 4, 5], Some(&bone_maps));
+    fn soft(a: u16, b: u16, c: u16) -> BoneMap12 {
+        BoneMap12 { joint_indices: [a, b, c, 0], weights: [130, 76, 49, 0] }
+    }
+
+    fn rigid(joint: u16) -> BoneMap12 {
+        BoneMap12 { joint_indices: [joint, 0, 0, 0], weights: [255, 0, 0, 0] }
+    }
+
+    /// Constellation `LG_Rear4_Root_Skin`: pistons blend across 3-4 bones.
+    /// Cutting them into rigid per-joint pieces made them poke out, so a
+    /// soft-skinned submesh stays whole and is flagged for skinning.
+    #[test]
+    fn split_keeps_soft_skinned_submeshes_whole_and_flags_them() {
+        let bone_maps = vec![soft(3, 11, 10), soft(11, 3, 10), soft(2, 3, 0), rigid(4), rigid(4), rigid(4)];
+        let (submeshes, indices, soft_skinned) = split_rigid_weighted_submeshes(
+            &[submesh(0, 3), submesh(3, 3)],
+            &[0, 1, 2, 3, 4, 5],
+            Some(&bone_maps),
+        );
 
         let joints: Vec<u16> = submeshes.iter().map(|s| s.node_parent_index).collect();
-        assert_eq!(joints, [2, 3]);
-        assert_eq!(indices, [3, 4, 5, 0, 1, 2]);
+        assert_eq!(joints, [0, 4], "soft submesh stays on its node, rigid one moves to its joint");
+        assert_eq!(soft_skinned, [true, false]);
+        assert_eq!(indices, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn soft_skin_weights_cover_only_soft_submesh_vertices() {
+        let bone_maps = vec![soft(3, 11, 10), soft(11, 3, 10), soft(2, 3, 0), rigid(4), rigid(4), rigid(4)];
+        // Vertex 2 is shared with the rigid submesh, which wins.
+        let indices = [0, 1, 2, 2, 4, 5];
+        let weights = soft_skin_weights(
+            &[submesh(0, 3), submesh(3, 3)],
+            &indices,
+            &[true, false],
+            Some(&bone_maps),
+            6,
+        )
+        .expect("a soft submesh yields weights");
+
+        let weighted: Vec<bool> = weights.iter().map(|w| w.weights.iter().any(|v| *v > 0)).collect();
+        assert_eq!(weighted, [true, true, false, false, false, false]);
+        assert_eq!(weights[0].joint_indices, [3, 11, 10, 0]);
+    }
+
+    #[test]
+    fn soft_skin_weights_are_absent_without_soft_submeshes() {
+        let bone_maps = vec![rigid(4); 3];
+        assert!(soft_skin_weights(&[submesh(0, 3)], &[0, 1, 2], &[false], Some(&bone_maps), 3).is_none());
     }
 }

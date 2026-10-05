@@ -165,6 +165,7 @@ pub(crate) fn empty_child_mesh() -> crate::types::Mesh {
         model_max: [0.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [0.0; 3],
+        skin_weights: None,
     }
 }
 

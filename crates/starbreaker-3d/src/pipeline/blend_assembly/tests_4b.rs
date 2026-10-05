@@ -236,6 +236,7 @@ fn test_decal_face_indices_use_source_material_id() {
         model_max: [0.0, 0.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [0.0, 0.0, 0.0],
+        skin_weights: None,
     };
     let mesh_with_decals = MeshWithDecals {
         mesh_path: "source_id_mesh".to_string(),
@@ -277,6 +278,7 @@ fn test_decal_face_indices_fall_back_to_submesh_material_name() {
         model_max: [0.0, 0.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [0.0, 0.0, 0.0],
+        skin_weights: None,
     };
     let mesh_with_decals = MeshWithDecals {
         mesh_path: "name_fallback_mesh".to_string(),
@@ -330,6 +332,7 @@ fn test_decal_face_indices_prefers_material_name_over_mismatched_source_material
         model_max: [0.0, 0.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [0.0, 0.0, 0.0],
+        skin_weights: None,
     };
     let mesh_with_decals = MeshWithDecals {
         mesh_path: "prefer_name_mesh".to_string(),
@@ -373,6 +376,7 @@ fn test_validate_vertex_groups_valid() {
         VertexGroup {
             name: "starbreaker_decal_offset".to_string(),
             vertex_indices: vec![0, 1, 2, 3],
+            weights: None,
         },
     ];
     
@@ -385,6 +389,7 @@ fn test_validate_vertex_groups_empty_name() {
         VertexGroup {
             name: "".to_string(),
             vertex_indices: vec![0, 1],
+            weights: None,
         },
     ];
     
@@ -397,8 +402,76 @@ fn test_validate_vertex_groups_out_of_bounds() {
         VertexGroup {
             name: "Group".to_string(),
             vertex_indices: vec![0, 1, 15],  // 15 is out of bounds
+            weights: None,
         },
     ];
     
     assert!(validate_vertex_groups(&vgroups, 10).is_err());
+}
+
+fn skin_test_nmc(names: &[&str]) -> NodeMeshCombo {
+    let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+    NodeMeshCombo {
+        nodes: names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| crate::nmc::NmcNode {
+                name: (*name).to_string(),
+                parent_index: index.checked_sub(1).map(|parent| parent as u16),
+                world_to_bone: identity,
+                bone_to_world: identity,
+                scale: [1.0; 3],
+                geometry_type: 0,
+                properties: Default::default(),
+            })
+            .collect(),
+        material_indices: Vec::new(),
+    }
+}
+
+/// A soft-skinned piston vertex blends top and bottom bones; the groups are
+/// named after the skeleton nodes so the addon can bind them to bone objects.
+#[test]
+fn skin_vertex_groups_emit_one_weighted_group_per_joint() {
+    use crate::ivo::skin::BoneMap12;
+    let mut mesh = empty_anchor_mesh();
+    mesh.positions = vec![[0.0; 3]; 3];
+    mesh.skin_weights = Some(vec![
+        BoneMap12 { joint_indices: [1, 2, 0, 0], weights: [166, 89, 0, 0] },
+        BoneMap12 { joint_indices: [0; 4], weights: [0; 4] },
+        BoneMap12 { joint_indices: [2, 2, 0, 0], weights: [128, 127, 0, 0] },
+    ]);
+    let groups = skin_vertex_groups(&mesh, &skin_test_nmc(&["Root", "PistonTop", "PistonBottom"]));
+
+    let summary: Vec<(&str, &[usize], Vec<f32>)> = groups
+        .iter()
+        .map(|g| {
+            let weights = g.weights.as_ref().unwrap().iter().map(|w| (w * 255.0).round()).collect();
+            (g.name.as_str(), g.vertex_indices.as_slice(), weights)
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [("PistonTop", &[0][..], vec![166.0]), ("PistonBottom", &[0, 2][..], vec![89.0, 255.0])]
+    );
+}
+
+#[test]
+fn skin_vertex_groups_are_empty_without_skin_weights() {
+    let mesh = empty_anchor_mesh();
+    assert!(skin_vertex_groups(&mesh, &skin_test_nmc(&["Root"])).is_empty());
+}
+
+#[test]
+fn remap_vertex_groups_keeps_weights_with_their_vertices() {
+    let groups = vec![VertexGroup {
+        name: "PistonTop".to_string(),
+        vertex_indices: vec![4, 2, 9],
+        weights: Some(vec![0.25, 0.5, 0.75]),
+    }];
+    let old_to_new: HashMap<u32, u32> = [(4, 1), (2, 0)].into_iter().collect();
+
+    let remapped = remap_vertex_groups(Some(&groups), &old_to_new).unwrap();
+    assert_eq!(remapped[0].vertex_indices, [0, 1]);
+    assert_eq!(remapped[0].weights.as_deref(), Some(&[0.5, 0.25][..]));
 }

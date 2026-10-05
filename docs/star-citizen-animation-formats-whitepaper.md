@@ -340,15 +340,23 @@ via `BoneMap12`, and groups triangles by joint. The decision rule:
 | ----------------------------------------------- | ---------------------------------------------- |
 | `bone_maps == None`                             | Treat as static; keep `node_parent_index = 0` |
 | A vertex has no weighted joint                  | Keep the original submesh                      |
-| `grouped_indices.len() ≥ 1`                     | Split per-joint; reassign `node_parent_index = joint` for each piece |
+| `rigid_ratio < 0.9`                             | Soft-skinned; keep whole and keep its skin weights |
+| `grouped_indices.len() ≥ 1` and `rigid_ratio ≥ 0.9` | Split per-joint; reassign `node_parent_index = joint` for each piece |
 
-Each triangle goes to the dominant joint shared by at least two of its
-vertices (otherwise the first vertex's). Soft-skinned submeshes are split
-the same way rather than kept whole: no export path emits skin weights,
-so a whole soft-skinned submesh would stay frozen at the root (e.g. the
-Constellation's `LG_Rear4_Root_Skin`, whose pistons blend across 3-4
-bones). Blended regions then move rigidly with their dominant bone
-instead of stretching.
+`rigid_ratio` is the fraction of triangles where all three vertices
+share the same dominant joint. The 0.9 threshold tolerates a few
+mixed-bone triangles at seams without misclassifying.
+
+Soft-skinned submeshes (e.g. the Constellation's `LG_Rear4_Root_Skin`,
+whose telescoping pistons blend across 3-4 bones) cannot be cut into
+rigid pieces without parts that should stretch poking out. Their
+`BoneMap12` weights are kept on `Mesh::skin_weights` (vertices also drawn
+by a rigid submesh get none), and the decomposed `.blend` writer emits
+one weighted vertex group per joint, named after the joint's skeleton
+node. The Blender add-on (`runtime/skinning.py`) rigs each such mesh with
+an armature whose bones copy the world transform of the animated bone
+objects, so the mesh deforms with linear-blend skinning through every
+animation path.
 
 After classification, rigid pieces are vertex-rebased into
 their owning bone's local frame (so glTF emission can attach the mesh
