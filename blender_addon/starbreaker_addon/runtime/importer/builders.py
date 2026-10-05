@@ -1492,10 +1492,17 @@ class BuildersMixin:
             nodes,
             links,
             base_color_socket=decal_palette.color if decal_palette.color is not None else (primary_color_node.outputs[0] if primary_color_node is not None else None),
-            base_alpha_socket=(
-                (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
-                if plan.uses_alpha
-                else None
+            base_alpha_socket=self._alpha_tested_socket(
+                nodes,
+                links,
+                submaterial,
+                (
+                    (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
+                    if plan.uses_alpha
+                    else None
+                ),
+                x=-460,
+                y=380,
             ),
             normal_color_socket=primary_normal_node.outputs[0] if primary_normal_node is not None else None,
             roughness_socket=primary_roughness,
@@ -1551,10 +1558,17 @@ class BuildersMixin:
                 nodes,
                 links,
                 base_color_socket=secondary_color_node.outputs[0] if secondary_color_node is not None else None,
-                base_alpha_socket=(
-                    _output_socket(secondary_color_node, "Alpha")
-                    if (secondary_color_node is not None and plan.uses_alpha)
-                    else None
+                base_alpha_socket=self._alpha_tested_socket(
+                    nodes,
+                    links,
+                    submaterial,
+                    (
+                        _output_socket(secondary_color_node, "Alpha")
+                        if (secondary_color_node is not None and plan.uses_alpha)
+                        else None
+                    ),
+                    x=-460,
+                    y=-420,
                 ),
                 normal_color_socket=secondary_normal_node.outputs[0] if secondary_normal_node is not None else None,
                 roughness_socket=secondary_roughness,

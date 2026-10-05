@@ -41,6 +41,7 @@ from ...manifest import (
 )
 from ...material_contract import ContractInput, ShaderGroupContract
 from ...templates import (
+    alpha_test_threshold,
     material_palette_channels,
     representative_textures,
     smoothness_texture_reference,
@@ -680,6 +681,33 @@ class MaterialsMixin:
             multiply.inputs[1].default_value = opacity
             return multiply.outputs[0]
         return source_socket
+
+    def _alpha_tested_socket(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        submaterial: SubmaterialRecord,
+        alpha_socket: bpy.types.NodeSocket | None,
+        *,
+        x: int,
+        y: int,
+    ) -> bpy.types.NodeSocket | None:
+        """Snap alpha to 0/1 at the authored ``AlphaTest`` cut-off.
+
+        Blender 5 has no material alpha threshold, so an alpha-tested surface
+        would otherwise render its texture alpha as partial transparency.
+        """
+        threshold = alpha_test_threshold(submaterial)
+        if alpha_socket is None or threshold is None:
+            return alpha_socket
+        compare = nodes.new("ShaderNodeMath")
+        compare.operation = "GREATER_THAN"
+        compare.label = "Alpha Test"
+        compare.location = (x, y)
+        links.new(alpha_socket, compare.inputs[0])
+        # CryEngine keeps alpha >= AlphaTest; GREATER_THAN is strict.
+        compare.inputs[1].default_value = threshold - 1e-4
+        return compare.outputs[0]
 
     def _contract_input_source_socket(
         self,

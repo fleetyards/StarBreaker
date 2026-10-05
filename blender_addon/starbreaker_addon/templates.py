@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .manifest import PaletteChannel, SubmaterialRecord, TextureReference
 
@@ -53,7 +53,36 @@ def _uses_decal_or_stencil_template(submaterial: SubmaterialRecord) -> bool:
     return family == "MeshDecal" or flags.has_decal or (flags.has_stencil_map and family != "HardSurface")
 
 
+def alpha_test_threshold(submaterial: SubmaterialRecord) -> float | None:
+    """Authored ``AlphaTest`` cut-off of an alpha-tested surface, if any.
+
+    CryEngine discards pixels whose alpha is below ``AlphaTest`` and draws
+    the rest opaque, e.g. the Star Runner's POM floor grate (0.61). Decals
+    and stencils blend over their host instead and are excluded.
+    """
+    flags = submaterial.decoded_feature_flags
+    if submaterial.shader_family == "MeshDecal" or flags.has_decal or flags.has_stencil_map:
+        return None
+    for attribute in submaterial.raw.get("authored_attributes", []):
+        if attribute.get("name") != "AlphaTest":
+            continue
+        try:
+            value = float(attribute.get("value"))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0.0 else None
+    return None
+
+
 def template_plan_for_submaterial(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
+    plan = _base_template_plan(submaterial)
+    if plan.uses_alpha and plan.blend_method == "BLEND" and alpha_test_threshold(submaterial) is not None:
+        # Alpha-tested: hard cut-out, not a translucent blend.
+        return replace(plan, blend_method="CLIP")
+    return plan
+
+
+def _base_template_plan(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     family = submaterial.shader_family
     flags = submaterial.decoded_feature_flags
 
