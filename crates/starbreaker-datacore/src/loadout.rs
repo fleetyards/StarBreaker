@@ -417,7 +417,14 @@ fn resolve_sub_geometry(idx: &EntityIndex, children: &mut [LoadoutNode]) {
             child.geometry_path = Some(m.geometry_path.clone());
             if !m.material_path.is_empty() { child.material_path = Some(m.material_path.clone()); }
         } else if variants.len() > 1 {
-            if has_multiple_geometry_variants(&variants) {
+            if !needs_variant_fallback(child.geometry_path.as_deref()) {
+                log::debug!(
+                    "  SubGeometry: {} matched no variant for port='{}'; keeping default geometry {}",
+                    child.entity_name,
+                    child.item_port_name,
+                    child.geometry_path.as_deref().unwrap_or("")
+                );
+            } else if has_multiple_geometry_variants(&variants) {
                 log::warn!(
                     "  SubGeometry: {} has {} variants but none matched port='{}' bone='{}' tags='{}'. Variants: [{}]",
                     child.entity_name, variants.len(), child.item_port_name,
@@ -465,6 +472,14 @@ fn should_attempt_sub_geometry_resolution(
     variants: &[SubGeometryVariant],
 ) -> bool {
     geometry_path.is_some() || !variants.is_empty()
+}
+
+/// Whether an entity with no matching SubGeometry variant should borrow an
+/// unclaimed one. Only entities without geometry of their own do: the
+/// Carrack's thrusters carry the 600i's variants left over in their records,
+/// and taking those replaced the Carrack's own engines with 600i parts.
+fn needs_variant_fallback(geometry_path: Option<&str>) -> bool {
+    geometry_path.is_none_or(|path| path.trim().is_empty())
 }
 
 fn has_multiple_geometry_variants(variants: &[SubGeometryVariant]) -> bool {
@@ -871,6 +886,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{port} should match a variant"));
             assert_eq!(matched.tag, tag, "{port}");
         }
+    }
+
+    #[test]
+    fn only_entities_without_own_geometry_borrow_unmatched_variants() {
+        assert!(needs_variant_fallback(None));
+        assert!(needs_variant_fallback(Some("")));
+        assert!(!needs_variant_fallback(Some(
+            "Objects/Spaceships/Thrusters/ANVL/ANVL_Carrack_Thrusters/ANVL_Carrack_Thruster_Main_Large.cga"
+        )));
     }
 
     #[test]
