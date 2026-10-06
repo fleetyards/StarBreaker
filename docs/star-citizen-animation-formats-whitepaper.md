@@ -358,6 +358,14 @@ an armature whose bones copy the world transform of the animated bone
 objects, so the mesh deforms with linear-blend skinning through every
 animation path.
 
+`BoneMap12` joint indices point into the `.skin`'s **own** `CompiledBones`
+list, which need not match the `.chr` skeleton the asset is posed with.
+The Idris landing-gear CHRs carry an extra `<gear>_root` bone at index 1
+that their skins lack, so taking skin joints as CHR indices shifts every
+piece onto the next bone (the foot pistons follow `Base` and stay below
+the hull when retracted). `load_geometry_parts` re-indexes joints by bone
+name onto the skeleton before the split pieces are rebased.
+
 After classification, rigid pieces are vertex-rebased into
 their owning bone's local frame (so glTF emission can attach the mesh
 directly under the bone node and inherit its world transform). The

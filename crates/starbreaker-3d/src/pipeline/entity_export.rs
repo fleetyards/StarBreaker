@@ -242,6 +242,7 @@ fn load_geometry_parts(
         .unwrap_or(material_path);
     let (mut mesh, mtl_file, textures, mut nmc) =
         load_single_mesh(p4k, &primary_path, effective_material, opts, png_cache, use_model_bbox)?;
+    remap_skin_joints_to_skeleton(p4k, &mut mesh, &primary_path, &skeleton_bones);
 
     if nmc.is_none() {
         nmc = synthesize_nmc_from_bones(&mesh, &skeleton_bones);
@@ -255,6 +256,7 @@ fn load_geometry_parts(
     for part in &resolved.parts[1..] {
         match load_single_mesh(p4k, &part.path, material_path, &no_tex_opts, png_cache, use_model_bbox) {
             Ok((mut extra_mesh, _, _, _)) => {
+                remap_skin_joints_to_skeleton(p4k, &mut extra_mesh, &part.path, &skeleton_bones);
                 if let Some(ref bone_name) = part.bone_name {
                     if let Some(bone) = skeleton_bones.iter().find(|b| b.name.eq_ignore_ascii_case(bone_name)) {
                         transform_mesh_by_bone(
@@ -316,6 +318,76 @@ pub(crate) fn load_skeleton(
         }
     }
     Vec::new()
+}
+
+/// Re-index a skin mesh's joints from the skin's own bone list onto `skeleton`.
+///
+/// A `.skin` indexes its vertex joints into its own CompiledBones, which need
+/// not match the `.chr` it is posed with: the Idris gear CHRs add a
+/// `<name>_root` bone at index 1 that the skins lack, so every part followed
+/// the bone one slot further down and the retracted foot pistons stayed below
+/// the hull.
+fn remap_skin_joints_to_skeleton(
+    p4k: &MappedP4k,
+    mesh: &mut crate::types::Mesh,
+    geometry_path: &str,
+    skeleton: &[crate::skeleton::Bone],
+) {
+    if skeleton.is_empty() {
+        return;
+    }
+    let Some(mesh_bones) = p4k
+        .entry_case_insensitive(&datacore_path_to_p4k(geometry_path))
+        .and_then(|entry| p4k.read(entry).ok())
+        .and_then(|data| crate::skeleton::parse_skeleton(&data))
+    else {
+        return;
+    };
+    let Some(remap) = skin_joint_remap(&mesh_bones, skeleton) else {
+        return;
+    };
+    log::debug!("  re-indexed skin joints of {geometry_path} onto its skeleton");
+    apply_joint_remap(mesh, &remap);
+}
+
+/// Skin bone index -> skeleton bone index by name, or `None` when the lists
+/// already agree. Bones the skeleton lacks keep their index.
+fn skin_joint_remap(
+    mesh_bones: &[crate::skeleton::Bone],
+    skeleton: &[crate::skeleton::Bone],
+) -> Option<Vec<u16>> {
+    let remap: Vec<u16> = mesh_bones
+        .iter()
+        .enumerate()
+        .map(|(index, bone)| {
+            skeleton
+                .iter()
+                .position(|candidate| candidate.name.eq_ignore_ascii_case(&bone.name))
+                .unwrap_or_else(|| {
+                    log::warn!("  skin bone '{}' missing from skeleton", bone.name);
+                    index
+                }) as u16
+        })
+        .collect();
+    remap
+        .iter()
+        .enumerate()
+        .any(|(index, &mapped)| index as u16 != mapped)
+        .then_some(remap)
+}
+
+fn apply_joint_remap(mesh: &mut crate::types::Mesh, remap: &[u16]) {
+    let map = |joint: u16| remap.get(joint as usize).copied().unwrap_or(joint);
+    for submesh in &mut mesh.submeshes {
+        submesh.node_parent_index = map(submesh.node_parent_index);
+    }
+    for weights in mesh.skin_weights.iter_mut().flatten() {
+        for (joint, weight) in weights.joint_indices.iter_mut().zip(weights.weights) {
+            if weight > 0 {
+                *joint = map(*joint);
+            }
+        }
+    }
 }
 
 /// Look up a `.chrparams` for the given skeleton path, find an animation
@@ -932,6 +1004,41 @@ mod tests {
         for (got, want) in p.iter().zip([1.5, 1.75, 3.125].iter()) {
             assert!((got - want).abs() < 1e-5, "got {p:?}");
         }
+    }
+
+    fn named_bone(name: &str) -> crate::skeleton::Bone {
+        crate::skeleton::Bone { name: name.to_string(), ..bone_at([0.0; 3], IDENTITY_QUAT) }
+    }
+
+    /// The Idris gear CHR has a `_root` bone the skin lacks; the skin's joint
+    /// indices must follow bone names onto the CHR, not stay positional.
+    #[test]
+    fn skin_joints_follow_bone_names_onto_the_skeleton() {
+        let skin = ["Gear", "Gear_Base", "Gear_Piston"].map(named_bone);
+        let chr = ["Gear", "Gear_root", "gear_base", "Gear_Piston"].map(named_bone);
+        let remap = skin_joint_remap(&skin, &chr).expect("lists differ");
+        assert_eq!(remap, vec![0, 2, 3]);
+        assert_eq!(skin_joint_remap(&skin, &skin), None, "matching lists need no remap");
+
+        let mut mesh = plate();
+        mesh.submeshes = vec![SubMesh {
+            material_name: None,
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 0,
+            first_vertex: 0,
+            num_vertices: 1,
+            node_parent_index: 2,
+        }];
+        mesh.skin_weights = Some(vec![crate::ivo::skin::BoneMap12 {
+            joint_indices: [1, 2, 0, 0],
+            weights: [128, 127, 0, 0],
+        }]);
+        apply_joint_remap(&mut mesh, &remap);
+        assert_eq!(mesh.submeshes[0].node_parent_index, 3);
+        let weights = mesh.skin_weights.unwrap()[0];
+        assert_eq!(weights.joint_indices, [2, 3, 0, 0], "unweighted slots stay untouched");
     }
 
     #[test]
