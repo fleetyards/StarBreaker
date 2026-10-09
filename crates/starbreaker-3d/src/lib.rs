@@ -9,6 +9,7 @@ pub mod nmc;
 pub(crate) mod pipeline;
 pub mod skeleton;
 pub(crate) mod socpak;
+pub(crate) mod socpak_children;
 pub mod types;
 pub mod animation;
 pub mod chrparams;

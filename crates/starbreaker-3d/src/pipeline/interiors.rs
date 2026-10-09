@@ -1,6 +1,7 @@
 //! Interior mesh discovery, loading, and preloading orchestration.
 //!
-//! Discovers interior CGF geometry from DataCore (`load_interiors`), builds
+//! Discovers interior CGF geometry from DataCore (`load_interiors`, including
+//! containers nested under `<ChildObjectContainers>`), builds
 //! interior containers from socpak payloads (`build_interiors_from_payloads`),
 //! preloads unique CGF meshes in parallel (`preload_interior_meshes`) and their
 //! associated texture sets (`preload_interior_textures`). Also contains
@@ -93,7 +94,7 @@ pub(crate) fn load_interiors(
     let root_nmc = (!root_geometry_path.is_empty())
         .then(|| load_nmc_for_cgf(p4k, &root_geometry_path))
         .flatten();
-    let container_instances: Vec<_> = containers
+    let top_level_instances: Vec<_> = containers
         .iter()
         .map(|container| {
             let helper_transform =
@@ -114,7 +115,7 @@ pub(crate) fn load_interiors(
             let parent_node_name = helper_transform
                 .and(container.bone_name.as_ref().filter(|name| !name.is_empty()).cloned());
             (
-                container,
+                container.file_name.clone(),
                 container_transform,
                 reference_transform,
                 parent_entity_name,
@@ -122,22 +123,23 @@ pub(crate) fn load_interiors(
             )
         })
         .collect();
+    let container_instances = with_child_object_containers(p4k, top_level_instances);
     let mut root_item_port_reference_candidates: std::collections::HashMap<String, Vec<[[f32; 4]; 4]>> =
         std::collections::HashMap::new();
-    for (container, _, reference_transform, _, _) in &container_instances {
+    for (file_name, _, reference_transform, _, _) in &container_instances {
         root_item_port_reference_candidates
-            .entry(container.file_name.to_ascii_lowercase())
+            .entry(file_name.to_ascii_lowercase())
             .or_default()
             .push(*reference_transform);
     }
-    for (container, container_transform, _, parent_entity_name, parent_node_name) in &container_instances {
+    for (file_name, container_transform, _, parent_entity_name, parent_node_name) in &container_instances {
         let reference_candidates = root_item_port_reference_candidates
-            .get(&container.file_name.to_ascii_lowercase())
+            .get(&file_name.to_ascii_lowercase())
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         match socpak::load_interior_from_socpak(
             p4k,
-            &container.file_name,
+            file_name,
             *container_transform,
             glam::Mat4::IDENTITY.to_cols_array_2d(),
             reference_candidates,
@@ -152,7 +154,7 @@ pub(crate) fn load_interiors(
                 payload.parent_node_name = parent_node_name.clone();
                 payloads.push(payload);
             }
-            Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
+            Err(e) => log::warn!("failed to load {file_name}: {e}"),
         }
     }
 
@@ -170,6 +172,43 @@ pub(crate) fn load_interiors(
         );
     }
     loaded
+}
+
+/// `(socpak, container transform, reference transform, parent entity, parent node)`.
+type ContainerInstance = (String, [[f32; 4]; 4], [[f32; 4]; 4], Option<String>, Option<String>);
+
+/// Nested containers can themselves nest; past this depth a cycle is assumed.
+const MAX_CHILD_CONTAINER_DEPTH: usize = 8;
+
+/// Append the containers each container lists under `<ChildObjectContainers>`,
+/// recursively. A child is placed relative to its parent container and hangs
+/// off the same parent node.
+fn with_child_object_containers(p4k: &MappedP4k, top_level: Vec<ContainerInstance>) -> Vec<ContainerInstance> {
+    let mut instances = Vec::with_capacity(top_level.len());
+    let mut pending: Vec<(ContainerInstance, usize)> = top_level.into_iter().rev().map(|instance| (instance, 0)).collect();
+    while let Some((instance, depth)) = pending.pop() {
+        if depth < MAX_CHILD_CONTAINER_DEPTH {
+            let children = crate::socpak_children::child_object_containers(p4k, &instance.0);
+            for child in children.into_iter().rev() {
+                log::info!("  nested container {} inside {}", child.file_name, instance.0);
+                let local = mat4_from_array(&child.local_transform);
+                pending.push((
+                    (
+                        child.file_name,
+                        mat4_to_array(mat4_from_array(&instance.1) * local),
+                        mat4_to_array(mat4_from_array(&instance.2) * local),
+                        instance.3.clone(),
+                        instance.4.clone(),
+                    ),
+                    depth + 1,
+                ));
+            }
+        } else {
+            log::warn!("nested containers deeper than {MAX_CHILD_CONTAINER_DEPTH} under {}", instance.0);
+        }
+        instances.push(instance);
+    }
+    instances
 }
 
 fn helper_node_name_matches(node_name: &str, helper_name: &str) -> bool {
