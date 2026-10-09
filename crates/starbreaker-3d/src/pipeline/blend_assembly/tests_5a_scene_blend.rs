@@ -2068,6 +2068,7 @@ fn create_test_input(
             offset_rotation: [0.0, 0.0, 0.0],
             detach_direction: [0.0, 0.0, 0.0],
             port_flags: String::new(),
+            docking_collar_port: None,
         });
     }
 

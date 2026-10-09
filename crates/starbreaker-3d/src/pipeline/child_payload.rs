@@ -82,6 +82,10 @@ pub(crate) struct ChildPayloadSpec {
     pub(crate) parent_entity_name: String,
     pub(crate) parent_node_name: String,
     pub(crate) no_rotation: bool,
+    /// `(port name, record)` of each item directly attached to `child`, kept
+    /// even for items without geometry so the child's docking collar port can
+    /// be found once the database is at hand.
+    pub(crate) port_items: Vec<(String, starbreaker_datacore::types::Record)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -138,6 +142,11 @@ pub(crate) fn collect_child_payload_specs(
                 parent_entity_name: parent_entity_name.to_string(),
                 parent_node_name: attach_name,
                 no_rotation,
+                port_items: child
+                    .children
+                    .iter()
+                    .map(|item| (item.attachment_name.clone(), item.record))
+                    .collect(),
             });
             collect_child_payload_specs(&child.children, &child.entity_name, None, out);
         } else {
@@ -324,6 +333,13 @@ pub(crate) fn load_child_payloads(
             let child = &spec.child;
             let entity_category = entity_record_category(db, &child.record);
             let attach_def_type = entity_record_attach_def_type(db, &child.record);
+            let docking_collar_port = spec
+                .port_items
+                .iter()
+                .find(|(_, record)| {
+                    entity_record_attach_def_type(db, record).as_deref() == Some("DockingCollar")
+                })
+                .map(|(port, _)| port.clone());
             if child.has_geometry {
                 let asset_index = spec_asset_indices[spec_index]?;
                 let loaded = loaded_assets.get(asset_index)?.as_ref()?;
@@ -347,6 +363,7 @@ pub(crate) fn load_child_payloads(
                     offset_rotation: child.offset_rotation,
                     detach_direction: child.detach_direction,
                     port_flags: child.port_flags.clone(),
+                    docking_collar_port: docking_collar_port.clone(),
                 })
             } else if child.nmc.is_some() {
                 Some(crate::types::EntityPayload {
@@ -369,6 +386,7 @@ pub(crate) fn load_child_payloads(
                     offset_rotation: child.offset_rotation,
                     detach_direction: child.detach_direction,
                     port_flags: child.port_flags.clone(),
+                    docking_collar_port: docking_collar_port.clone(),
                 })
             } else {
                 None

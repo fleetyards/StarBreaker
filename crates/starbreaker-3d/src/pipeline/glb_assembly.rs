@@ -237,6 +237,7 @@ pub fn assemble_glb_with_loadout_with_progress(
                     offset_rotation: [0.0; 3],
                     detach_direction: [0.0; 3],
                     port_flags: String::new(),
+                    docking_collar_port: None,
                 });
                 log::info!("  landing gear '{gear_path}' → '{bone_name}', {verts} verts");
             }

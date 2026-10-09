@@ -606,6 +606,9 @@ pub struct EntityPayload {
     pub detach_direction: [f32; 3],
     /// Raw item port flags from SItemPortDef (e.g. "invisible uneditable").
     pub port_flags: String,
+    /// This entity's own item port that holds a `DockingCollar` item, if any.
+    /// A docked vehicle is mated to its host through this port.
+    pub docking_collar_port: Option<String>,
 }
 
 /// A light extracted from a CryXMLB entity in a .soc file.

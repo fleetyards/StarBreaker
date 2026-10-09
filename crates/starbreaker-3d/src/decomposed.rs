@@ -220,16 +220,21 @@ fn docking_host_world_matrix(
         .map(|(index, _)| builder.compute_node_world_matrix(index))
 }
 
+/// Model-space translation of the first NMC node whose name matches. NMC
+/// transforms are parent-relative, so the parent chain is composed.
+fn nmc_node_model_translation(nmc: &NodeMeshCombo, matches: impl Fn(&str) -> bool) -> Option<glam::Vec3> {
+    let index = nmc.nodes.iter().position(|node| matches(&node.name))?;
+    let world = crate::pipeline::compute_nmc_world_transforms(nmc);
+    Some(world.get(index)?.w_axis.truncate())
+}
+
 fn child_docking_vehicle_translation(nmc: Option<&NodeMeshCombo>) -> Option<glam::Vec3> {
-    nmc?.nodes.iter().find_map(|node| {
-        node.name.to_ascii_lowercase().contains("docking_vehicle").then(|| {
-            glam::Vec3::new(
-                node.bone_to_world[0][3],
-                node.bone_to_world[1][3],
-                node.bone_to_world[2][3],
-            )
-        })
-    })
+    nmc_node_model_translation(nmc?, |name| name.to_ascii_lowercase().contains("docking_vehicle"))
+}
+
+fn child_docking_collar_translation(child: &crate::types::EntityPayload) -> Option<glam::Vec3> {
+    let port = child.docking_collar_port.as_deref()?;
+    nmc_node_model_translation(child.nmc.as_ref()?, |name| name.eq_ignore_ascii_case(port))
 }
 
 fn docking_entity_attachment_offset(
@@ -237,8 +242,11 @@ fn docking_entity_attachment_offset(
     target_idx: usize,
     child: &crate::types::EntityPayload,
 ) -> Option<glam::Vec3> {
-    // Vehicle docking entity attachments align the child vehicle attach helper
-    // to a sibling docking host/door helper, not to the item-port node origin.
+    // A docked vehicle is not placed by its origin. A docking module (the
+    // Drake command module) aligns its `docking_vehicle` helper to a sibling
+    // docking host/door helper; a snub (the Merlin, the Skylark) has no such
+    // helper and instead mates the port holding its own docking collar to the
+    // host port it hangs on.
     if !child
         .port_flags
         .split_whitespace()
@@ -247,12 +255,14 @@ fn docking_entity_attachment_offset(
         return None;
     }
     let target_world = glam::Mat4::from_cols_array(&builder.compute_node_world_matrix(target_idx));
-    let host_world = glam::Mat4::from_cols_array(&docking_host_world_matrix(builder, target_idx)?);
-    let child_attach = child_docking_vehicle_translation(child.nmc.as_ref())?;
-    let desired_world = (host_world.w_axis
-        - glam::Vec4::new(child_attach.x, child_attach.y, child_attach.z, 0.0))
-    .truncate();
-    Some(target_world.inverse().transform_point3(desired_world))
+    let (host_translation, child_attach) = match child_docking_vehicle_translation(child.nmc.as_ref()) {
+        Some(child_attach) => {
+            let host_world = glam::Mat4::from_cols_array(&docking_host_world_matrix(builder, target_idx)?);
+            (host_world.w_axis.truncate(), child_attach)
+        }
+        None => (target_world.w_axis.truncate(), child_docking_collar_translation(child)?),
+    };
+    Some(target_world.inverse().transform_point3(host_translation - child_attach))
 }
 
 /// Index of the node that lists `node_idx` among its children, if any.
@@ -351,6 +361,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
                 offset_rotation: child.offset_rotation,
                 detach_direction: child.detach_direction,
                 port_flags: child.port_flags.clone(),
+                docking_collar_port: child.docking_collar_port.clone(),
             },
             &scene_nodes,
             MaterialMode::None,
@@ -3304,6 +3315,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: String::new(),
+            docking_collar_port: None,
         }
     }
 
@@ -4625,6 +4637,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: String::new(),
+            docking_collar_port: None,
         };
         assert!(should_export_engine_glow_targets(&child));
 
@@ -4756,6 +4769,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: "Docking_Request_Accepting".to_string(),
+            docking_collar_port: None,
         };
 
         let offset = docking_entity_attachment_offset(&builder, target_idx, &child)
@@ -4764,6 +4778,99 @@ mod tests {
         assert!((offset.x - 0.01448).abs() < 0.0001);
         assert!((offset.y - 3.24666).abs() < 0.0001);
         assert!((offset.z - 0.74132).abs() < 0.0001);
+    }
+
+    #[test]
+    fn docked_vehicle_mates_its_docking_collar_port_to_the_host_port() {
+        // Constellation Andromeda / P-52 Merlin helpers. The host port faces
+        // down, the Merlin's collar port faces up, and with both collars
+        // touching the Merlin's origin lands on the hull's authored
+        // `hardpoint_merlin_snap` helper.
+        let root_nmc = NodeMeshCombo {
+            nodes: vec![
+                test_nmc_node(
+                    "root",
+                    None,
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+                ),
+                test_nmc_node(
+                    "hardpoint_docking_collar_merlin",
+                    Some(0),
+                    [[-1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, -5.1890], [0.0, -1.0, 0.0, -1.3916]],
+                ),
+                test_nmc_node(
+                    "hardpoint_merlin_dock_door",
+                    Some(0),
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, -5.1890], [0.0, 0.0, 1.0, -1.3916]],
+                ),
+            ],
+            material_indices: Vec::new(),
+        };
+        // NMC transforms are parent-relative: the collar's model-space position
+        // (0, -1.9005, 0.8986) is only reached through its parent's offset.
+        let child_nmc = NodeMeshCombo {
+            nodes: vec![
+                test_nmc_node(
+                    "geo_body",
+                    None,
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, -0.5], [0.0, 0.0, 1.0, 1.0]],
+                ),
+                test_nmc_node(
+                    "hardpoint_docking_collar",
+                    Some(0),
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, -1.4005], [0.0, 1.0, 0.0, -0.1014]],
+                ),
+            ],
+            material_indices: Vec::new(),
+        };
+        let mut builder = GlbBuilder::new();
+        let dummy_packed = PackedMeshInfo {
+            mesh_idx: 0,
+            pos_accessor_idx: 0,
+            uv_accessor_idx: None,
+            secondary_uv_accessor_idx: None,
+            normal_accessor_idx: None,
+            color_accessor_idx: None,
+            tangent_accessor_idx: None,
+            submesh_mat_indices: Vec::new(),
+            submesh_idx_accessors: Vec::new(),
+        };
+        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false, false);
+        let target_idx = *builder
+            .node_name_to_idx
+            .get("hardpoint_docking_collar_merlin")
+            .expect("target node should exist") as usize;
+        let child = EntityPayload {
+            mesh: empty_test_mesh(),
+            materials: None,
+            textures: None,
+            nmc: Some(child_nmc),
+            palette: None,
+            geometry_path: "Objects/Spaceships/Ships/KRIG/P52_Merlin/test.cga".to_string(),
+            material_path: String::new(),
+            bones: Vec::new(),
+            skeleton_source_path: None,
+            entity_name: "KRIG_Test_Snub".to_string(),
+            entity_category: None,
+            attach_def_type: None,
+            parent_node_name: "hardpoint_docking_collar_merlin".to_string(),
+            parent_entity_name: "root".to_string(),
+            no_rotation: true,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: "Docking_Request_Accepting".to_string(),
+            docking_collar_port: Some("hardpoint_docking_collar".to_string()),
+        };
+
+        let offset = docking_entity_attachment_offset(&builder, target_idx, &child)
+            .expect("docking offset should be derived from the collar ports");
+        let target_world = glam::Mat4::from_cols_array(&builder.compute_node_world_matrix(target_idx));
+        let origin = target_world.transform_point3(offset);
+
+        assert!(origin.x.abs() < 0.0001, "{origin:?}");
+        assert!((origin.y - -3.2885).abs() < 0.0001, "{origin:?}");
+        assert!((origin.z - -2.2902).abs() < 0.0001, "{origin:?}");
     }
 
     #[test]
