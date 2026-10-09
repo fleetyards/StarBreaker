@@ -943,6 +943,22 @@ fn extract_loadout_from_value<'v, 'a>(entity_val: &'v Value<'a>) -> Option<&'v V
     None
 }
 
+/// Collect the children of `record`'s own `SEntityComponentDefaultLoadoutParams`.
+/// Each child entity's loadout is small, so this Value query is cheap.
+fn collect_default_loadout(idx: &EntityIndex, record: &Record, out: &mut Vec<LoadoutNode>, depth: usize) {
+    if let Ok(compiled) = idx.db.compile_path::<Value>(
+        record.struct_id(),
+        "Components[SEntityComponentDefaultLoadoutParams]",
+    ) && let Ok(components) = idx.db.query_no_references(&compiled, record)
+    {
+        for component in &components {
+            if let Some(loadout) = get_object_field(component, "loadout") {
+                collect_entries_recursive(idx, loadout, out, depth);
+            }
+        }
+    }
+}
+
 /// Walk a loadout Value tree recursively, collecting LoadoutNodes.
 /// The `loadout_value` is a SItemPortLoadoutManualParams with an `entries` array.
 /// Each entry may have its own nested `loadout` field, and may reference child
@@ -977,6 +993,16 @@ fn collect_entries_recursive(
         if !class_name.is_empty() {
             // Path A: entityClassName — O(1) lookup via EntityIndex
             let child = if let Some(child_record) = idx.find_record(class_name) {
+                // An entry that lists nothing for the item's own ports leaves
+                // them to the item's default loadout -- a snub named on its
+                // carrier's docking port still brings its thrusters, guns and
+                // docking collar.
+                let entry_lists_children = get_object_field(entry, "loadout")
+                    .and_then(|nested| get_array_field(nested, "entries"))
+                    .is_some_and(|entries| !entries.is_empty());
+                if !entry_lists_children {
+                    collect_default_loadout(idx, child_record, &mut grandchildren, depth + 1);
+                }
                 let (child_geom, child_mtl) = idx.query_geometry_paths(child_record);
                 let has_geom = child_geom.is_some();
                 log::debug!(
@@ -1120,18 +1146,7 @@ fn collect_entries_recursive(
                 let (ref_geom, ref_mtl) = idx.query_geometry_paths(ref_record);
 
                 // Also resolve the referenced entity's OWN loadout for nested children.
-                // Each child entity's loadout is small, so this Value query is cheap.
-                if let Ok(compiled) = idx.db.compile_path::<Value>(
-                    ref_record.struct_id(),
-                    "Components[SEntityComponentDefaultLoadoutParams]",
-                ) && let Ok(components) = idx.db.query_no_references(&compiled, ref_record)
-                {
-                    for component in &components {
-                        if let Some(loadout) = get_object_field(component, "loadout") {
-                            collect_entries_recursive(idx, loadout, &mut grandchildren, depth + 1);
-                        }
-                    }
-                }
+                collect_default_loadout(idx, ref_record, &mut grandchildren, depth + 1);
 
                 let has_geom = ref_geom.is_some();
                 log::debug!(
