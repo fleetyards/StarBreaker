@@ -64,6 +64,7 @@ from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.material_contract import ContractInput, ShaderGroupContract
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
 from starbreaker_addon.runtime.record_utils import (
+    _emissive_opacity_factor,
     _mesh_decal_authored_emission_strength,
     _mesh_decal_diffuse_multipliers,
 )
@@ -334,6 +335,31 @@ class TestMeshDecalEmissionStrength(unittest.TestCase):
             ),
             1.0,
         )
+
+
+class TestEmissiveOpacityFactor(unittest.TestCase):
+    def test_zero_emissive_opacity_suppresses_authored_emissive(self) -> None:
+        # Constellation Mk5 interior bridge glass: orange Emissive, never shown.
+        glass = SubmaterialRecord.from_value(
+            {
+                "shader_family": "GlassPBR",
+                "authored_attributes": [{"name": "Emissive", "value": "1,0.13286835,0"}],
+                "public_params": {"EmissiveOpacity": 0},
+            }
+        )
+        self.assertEqual(_emissive_opacity_factor(glass), 0.0)
+
+    def test_partial_emissive_opacity_scales_emission(self) -> None:
+        screen = SubmaterialRecord.from_value(
+            {"shader_family": "DisplayScreen", "public_params": {"EmissiveOpacity": "0.4"}}
+        )
+        self.assertAlmostEqual(_emissive_opacity_factor(screen), 0.4)
+
+    def test_materials_without_the_param_emit_unscaled(self) -> None:
+        hull = SubmaterialRecord.from_value(
+            {"shader_family": "Illum", "authored_attributes": [{"name": "Emissive", "value": "1,1,1"}]}
+        )
+        self.assertEqual(_emissive_opacity_factor(hull), 1.0)
 
 
 def _mesh_decal(string_gen_mask: str, **attributes: str) -> SubmaterialRecord:

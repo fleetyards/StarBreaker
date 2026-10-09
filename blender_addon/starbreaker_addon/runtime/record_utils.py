@@ -305,6 +305,25 @@ def _float_authored_attribute(submaterial: SubmaterialRecord, *names: str) -> fl
     return 0.0
 
 
+def _emissive_opacity_factor(submaterial: SubmaterialRecord) -> float:
+    """How much of the authored ``Emissive`` colour the engine shows.
+
+    Shader families with an ``EmissiveOpacity`` public param (GlassPBR,
+    DisplayScreen) scale their emissive colour by it, so a material can
+    author an ``Emissive`` colour that never glows. The Constellation Mk5's
+    interior bridge glass authors ``Emissive="1,0.13,0"`` with
+    ``EmissiveOpacity="0"``; emitting it anyway turned the whole canopy
+    orange. Materials without the param emit their colour unscaled.
+    """
+    value = submaterial.public_params.get("EmissiveOpacity")
+    if value is None:
+        return 1.0
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def _mesh_decal_authored_emission_strength(
     submaterial: SubmaterialRecord,
     *,

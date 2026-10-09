@@ -46,6 +46,7 @@ from ..constants import (
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets, _set_group_input_default
 from ..package_ops import _string_prop
 from ..record_utils import (
+    _emissive_opacity_factor,
     _float_authored_attribute,
     _float_public_param,
     _hard_surface_angle_shift_enabled,
@@ -978,7 +979,7 @@ class BuildersMixin:
         emissive_strength = max(
             _mean_triplet(emissive_triplet) or 0.0,
             _float_authored_attribute(submaterial, "Glow"),
-        )
+        ) * _emissive_opacity_factor(submaterial)
         if emissive_strength > 0.0 and not group_handles_emission:
             emissive_color_path = self._texture_export_path(submaterial, "emissive") or representative_textures(
                 submaterial
