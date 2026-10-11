@@ -3034,10 +3034,33 @@ def _apply_animation_mode_for_clip(
 
 
 def _clip_bone_hashes(clip: dict[str, Any]) -> set[str]:
+    """Bone hashes a clip moves.
+
+    Tracks that never change are left out: the Constellation GS landing gear
+    clip keys the nacelle turbine covers still, and counting them made
+    enabling the landing gear switch VTOL off.
+    """
     bones = clip.get("bones")
     if not isinstance(bones, dict):
         return set()
-    return {str(key) for key in bones.keys() if isinstance(key, str)}
+    return {
+        str(key)
+        for key, value in bones.items()
+        if isinstance(key, str) and not _bone_channels_are_static(value)
+    }
+
+
+def _bone_channels_are_static(value: Any) -> bool:
+    channels = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+    channels = [channel for channel in channels if isinstance(channel, dict)]
+    if not channels:
+        return False
+    for channel in channels:
+        for track in ("rotation", "position"):
+            samples = channel.get(track) or []
+            if any(sample != samples[0] for sample in samples[1:]):
+                return False
+    return True
 
 
 def _animation_clips(package: PackageBundle) -> list[dict[str, Any]]:
@@ -3916,7 +3939,49 @@ def _animation_bone_candidates(
     # front leg's bind and suppressing position leaves them half-folded.
     for obj_id in decisive_ids:
         policy.pop(obj_id, None)
+    candidates = [
+        candidate
+        for candidate in candidates
+        if not _channel_holds_bind_pose(candidate[3], candidate[2], decoder)
+    ]
     return candidates, policy, decoder
+
+
+def _channel_holds_bind_pose(
+    channel: dict[str, Any],
+    bind_data: dict[str, Any],
+    decoder: str,
+) -> bool:
+    """Whether a channel only holds its part still at the bind pose.
+
+    Such a track does nothing on its own but would undo another clip's pose
+    of the same part: the Constellation GS landing gear clip keys the nacelle
+    turbine covers still at cruise, and applying it after VTOL snapped them
+    back. In game the VTOL pose wins, so these tracks are skipped.
+    """
+    rotations = [sample for sample in channel.get("rotation") or [] if isinstance(sample, list) and len(sample) >= 4]
+    positions = [sample for sample in channel.get("position") or [] if isinstance(sample, list) and len(sample) >= 3]
+    if not rotations and not positions:
+        return False
+    if any(sample != rotations[0] for sample in rotations[1:]):
+        return False
+    if any(sample != positions[0] for sample in positions[1:]):
+        return False
+    if rotations:
+        bind_rotation = bind_data.get("rotation_quaternion")
+        if not isinstance(bind_rotation, list) or len(bind_rotation) < 4:
+            return False
+        rotation = _decode_animation_rotation(rotations[0], decoder)
+        if abs(sum(a * float(b) for a, b in zip(rotation, bind_rotation))) < 0.9999:
+            return False
+    if positions:
+        bind_location = bind_data.get("location")
+        if not isinstance(bind_location, list) or len(bind_location) < 3:
+            return False
+        position = _decode_animation_position(positions[0], decoder)
+        if sum((a - float(b)) ** 2 for a, b in zip(position, bind_location)) > 1e-6:
+            return False
+    return True
 
 
 def _object_matches_clip_target(obj: bpy.types.Object, target: Any) -> bool:

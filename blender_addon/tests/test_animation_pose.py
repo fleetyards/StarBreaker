@@ -374,7 +374,7 @@ class AnimationPoseTests(unittest.TestCase):
         bones = {
             source_hash: [
                 {
-                    "rotation": [[1.0, 0.0, 0.0, 0.0]],
+                    "rotation": [[0.0, 0.0, 0.0, 1.0]],
                 }
             ]
         }
@@ -405,6 +405,32 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertIs(candidates[0][0], child)
         self.assertEqual(candidates[0][1], source_hash)
 
+    def test_still_tracks_do_not_count_as_moved_bones(self) -> None:
+        # Constellation GS: the landing gear clip keys the nacelle turbine
+        # covers still; counting them switched VTOL off with the gear.
+        clip = {
+            "bones": {
+                "0x00000001": {"rotation": [[0.222, 0.0, 0.0, 0.975]] * 3},
+                "0x00000002": {"rotation": [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0]]},
+                "0x00000003": [
+                    {"position": [[1.0, 2.0, 3.0]] * 2},
+                    {"position": [[1.0, 2.0, 3.0], [1.0, 2.5, 3.0]]},
+                ],
+            }
+        }
+
+        self.assertEqual(self.package_ops._clip_bone_hashes(clip), {"0x00000002", "0x00000003"})
+
+    def test_channel_holding_the_bind_pose_is_skipped(self) -> None:
+        bind = self._bind_data((1.0, 2.0, 3.0))
+        holds_bind = {"rotation": [[1.0, 0.0, 0.0, 0.0]] * 3, "position": [[1.0, 2.0, 3.0]] * 3}
+        holds_other = {"rotation": [[0.0, 1.0, 0.0, 0.0]] * 3}
+        moves = {"rotation": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]}
+
+        self.assertTrue(self.package_ops._channel_holds_bind_pose(holds_bind, bind, "identity"))
+        self.assertFalse(self.package_ops._channel_holds_bind_pose(holds_other, bind, "identity"))
+        self.assertFalse(self.package_ops._channel_holds_bind_pose(moves, bind, "identity"))
+
     def test_targeted_clip_only_animates_its_door_instance(self) -> None:
         # The Constellation GS airlocks share one mesh; a door's own clip
         # names its hardpoint so the other airlock stays shut.
@@ -419,7 +445,7 @@ class AnimationPoseTests(unittest.TestCase):
             })
         root.children_recursive = [left, right]
         source_hash = f"0x{zlib.crc32(b'door_anim') & 0xFFFFFFFF:08X}"
-        bones = {source_hash: [{"rotation": [[1.0, 0.0, 0.0, 0.0]]}]}
+        bones = {source_hash: [{"rotation": [[0.0, 0.0, 0.0, 1.0]]}]}
         target = {
             "entity_name": "Door_Airlock",
             "parent_entity_name": "Root",
