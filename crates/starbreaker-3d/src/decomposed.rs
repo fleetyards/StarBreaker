@@ -1571,11 +1571,16 @@ pub(crate) fn write_decomposed_export(
         // Names are namespaced per owning vehicle first, so a nested vehicle's
         // clips only merge with each other.
         let mut name_to_index = std::collections::HashMap::<String, usize>::new();
+        // Skeletons that contributed to each merged clip, and the door items'
+        // own copies of their clips (see `append_door_clips`).
+        let mut contributors_by_name = std::collections::HashMap::<String, usize>::new();
+        let mut door_clips: Vec<(String, serde_json::Value, serde_json::Value)> = Vec::new();
 
         let mut append_from_skeleton = |skeleton_path: &str,
                                         include_unmatched: bool,
                                         allow_bone_subset_fallback: bool,
-                                        owner: Option<&str>| {
+                                        owner: Option<&str>,
+                                        door: Option<&EntityPayload>| {
             match crate::animation::extract_animations_for_skeleton_json(p4k, skeleton_path, include_unmatched, allow_bone_subset_fallback) {
                 Ok(Some(serde_json::Value::Array(values))) => {
                     for mut clip in values {
@@ -1590,6 +1595,12 @@ pub(crate) fn write_decomposed_export(
                         };
                         if owner.is_some() && !name.is_empty() {
                             clip["name"] = serde_json::Value::String(name.clone());
+                        }
+                        if !name.is_empty() {
+                            *contributors_by_name.entry(name.clone()).or_default() += 1;
+                            if let Some(door) = door {
+                                door_clips.push((name.clone(), door_clip_target(door), clip.clone()));
+                            }
                         }
                         if name.is_empty() {
                             clips.push(clip);
@@ -1630,15 +1641,17 @@ pub(crate) fn write_decomposed_export(
         };
 
         if let Some(skeleton_path) = input.root_skeleton_source_path.as_deref() {
-            append_from_skeleton(skeleton_path, true, false, None);
+            append_from_skeleton(skeleton_path, true, false, None, None);
         }
         let parent_by_entity = parent_entity_by_name(&input.children);
         for child in &input.children {
             if let Some(skeleton_path) = child.skeleton_source_path.as_deref() {
                 let owner = child_animation_owner(child, &parent_by_entity, &input.nested_vehicle_names);
-                append_from_skeleton(skeleton_path, false, true, owner.as_deref());
+                let door = is_door_item(child).then_some(child);
+                append_from_skeleton(skeleton_path, false, true, owner.as_deref(), door);
             }
         }
+        append_door_clips(&mut clips, door_clips, &contributors_by_name);
 
         if clips.is_empty() {
             None
@@ -3176,6 +3189,81 @@ fn child_animation_owner(
     None
 }
 
+/// Whether a child is a door item, which the game opens and closes on its
+/// own. The Constellation GS Merlin dock is a `DockingAnimator`.
+fn is_door_item(child: &EntityPayload) -> bool {
+    child.attach_def_type.as_deref().is_some_and(|kind| {
+        kind.eq_ignore_ascii_case("Door") || kind.eq_ignore_ascii_case("DockingAnimator")
+    })
+}
+
+/// The scene instance a door's own clip animates. The left and right
+/// Constellation GS airlocks share one mesh, so only the instance tells them
+/// apart.
+fn door_clip_target(door: &EntityPayload) -> serde_json::Value {
+    serde_json::json!({
+        "entity_name": door.entity_name,
+        "parent_entity_name": door.parent_entity_name,
+        "parent_node_name": door.parent_node_name,
+    })
+}
+
+/// Name of a door's own clip: the clip name prefixed with its hardpoint,
+/// e.g. `hardpoint_door_airlock_body_left` + `door_open` gives
+/// `airlock_body_left_door_open`.
+fn door_clip_name(parent_node_name: &str, clip_name: &str) -> String {
+    let label = parent_node_name
+        .split('_')
+        .filter(|word| {
+            !word.is_empty()
+                && !word.eq_ignore_ascii_case("hardpoint")
+                && !word.eq_ignore_ascii_case("door")
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    if label.is_empty() {
+        clip_name.to_string()
+    } else {
+        format!("{}_{clip_name}", label.to_ascii_lowercase())
+    }
+}
+
+/// Add a clip per door for clips that several parts share.
+///
+/// Same-named clips merge so one action moves every landing gear leg, but
+/// the Constellation GS names its cargo lift, personal lift, Merlin dock,
+/// airlock and fuel port clips all `door_open`/`door_close`, and in game
+/// each opens separately. The merged clip stays; each door also gets its own
+/// copy, restricted to its scene instance by a `target`.
+fn append_door_clips(
+    clips: &mut Vec<serde_json::Value>,
+    door_clips: Vec<(String, serde_json::Value, serde_json::Value)>,
+    contributors_by_name: &HashMap<String, usize>,
+) {
+    let mut used_names: HashSet<String> = clips
+        .iter()
+        .filter_map(|clip| clip.get("name").and_then(|name| name.as_str()))
+        .map(str::to_string)
+        .collect();
+    for (name, target, mut clip) in door_clips {
+        if contributors_by_name.get(&name).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        let parent_node_name = target["parent_node_name"].as_str().unwrap_or_default();
+        let base = door_clip_name(parent_node_name, &name);
+        let mut door_name = base.clone();
+        let mut suffix = 1u32;
+        while used_names.contains(&door_name) {
+            suffix += 1;
+            door_name = format!("{base}_{suffix}");
+        }
+        used_names.insert(door_name.clone());
+        clip["name"] = serde_json::Value::String(door_name);
+        clip["target"] = target;
+        clips.push(clip);
+    }
+}
+
 /// Clip name in its owner's namespace: root clips keep their name, nested
 /// vehicle clips are prefixed with the vehicle's entity name.
 fn namespaced_clip_name(owner: Option<&str>, clip_name: &str) -> String {
@@ -3354,6 +3442,46 @@ mod tests {
         let children = vec![attached("A", "B"), attached("B", "A")];
         let parents = parent_entity_by_name(&children);
         assert_eq!(child_animation_owner(&children[0], &parents, &HashSet::new()), None);
+    }
+
+    #[test]
+    fn door_clip_name_prefixes_the_hardpoint() {
+        assert_eq!(
+            door_clip_name("hardpoint_door_airlock_body_left", "door_open"),
+            "airlock_body_left_door_open"
+        );
+        assert_eq!(door_clip_name("hardpoint_door_elevator", "door_close"), "elevator_door_close");
+        assert_eq!(door_clip_name("hardpoint_cargo_bay", "door_open"), "cargo_bay_door_open");
+        assert_eq!(door_clip_name("", "door_open"), "door_open");
+    }
+
+    #[test]
+    fn shared_door_clips_get_a_targeted_copy_per_door() {
+        let clip = |name: &str| serde_json::json!({"name": name, "bones": {}});
+        let target = |port: &str| serde_json::json!({
+            "entity_name": "Door_Airlock",
+            "parent_entity_name": "Root",
+            "parent_node_name": port,
+        });
+        let mut clips = vec![clip("door_open"), clip("landing_gear_deploy")];
+        let door_clips = vec![
+            ("door_open".to_string(), target("hardpoint_door_airlock_body_left"), clip("door_open")),
+            ("door_open".to_string(), target("hardpoint_door_airlock_body_right"), clip("door_open")),
+            ("canopy_open".to_string(), target("hardpoint_canopy"), clip("canopy_open")),
+        ];
+        let contributors = HashMap::from([
+            ("door_open".to_string(), 2),
+            ("canopy_open".to_string(), 1),
+        ]);
+
+        append_door_clips(&mut clips, door_clips, &contributors);
+
+        let names: Vec<&str> = clips.iter().map(|clip| clip["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            ["door_open", "landing_gear_deploy", "airlock_body_left_door_open", "airlock_body_right_door_open"]
+        );
+        assert_eq!(clips[3]["target"]["parent_node_name"], "hardpoint_door_airlock_body_right");
     }
 
     #[test]

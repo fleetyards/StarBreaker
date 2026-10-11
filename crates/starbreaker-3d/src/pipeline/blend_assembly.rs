@@ -190,11 +190,16 @@ fn entity_root_properties(package_name: &str, entity_name: &str) -> Vec<(String,
 }
 
 fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -> Vec<(String, IdPropValue)> {
+    // `scene_entity_name` and the parent fields name the scene.json child this
+    // object belongs to, so a door's own animation clip can find its parts.
     let instance_json = serde_json::json!({
         "entity_name": instance.name,
         "mesh_asset": instance.mesh_asset,
         "material_sidecar": instance.material_sidecar,
         "palette_id": instance.palette_id,
+        "scene_entity_name": instance.entity_name,
+        "parent_entity_name": instance.parent_entity_name,
+        "parent_node_name": instance.parent_node_name,
     })
     .to_string();
     let mut props = vec![

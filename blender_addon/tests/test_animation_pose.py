@@ -405,6 +405,33 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertIs(candidates[0][0], child)
         self.assertEqual(candidates[0][1], source_hash)
 
+    def test_targeted_clip_only_animates_its_door_instance(self) -> None:
+        # The Constellation GS airlocks share one mesh; a door's own clip
+        # names its hardpoint so the other airlock stays shut.
+        root = self._make_object("StarBreaker RSI Constellation Andromeda GS_LOD0_TEX0", (0.0, 0.0, 0.0))
+        left = self._make_object("door_anim", (1.0, 0.0, 0.0))
+        right = self._make_object("door_anim", (-1.0, 0.0, 0.0))
+        for obj, port in ((left, "hardpoint_door_airlock_body_left"), (right, "hardpoint_door_airlock_body_right")):
+            obj["starbreaker_instance_json"] = json.dumps({
+                "entity_name": "Door_Airlock",
+                "parent_entity_name": "Root",
+                "parent_node_name": port,
+            })
+        root.children_recursive = [left, right]
+        source_hash = f"0x{zlib.crc32(b'door_anim') & 0xFFFFFFFF:08X}"
+        bones = {source_hash: [{"rotation": [[1.0, 0.0, 0.0, 0.0]]}]}
+        target = {
+            "entity_name": "Door_Airlock",
+            "parent_entity_name": "Root",
+            "parent_node_name": "hardpoint_door_airlock_body_left",
+        }
+
+        targeted, _policy, _decoder = self.package_ops._animation_bone_candidates(root, bones, target)
+        untargeted, _policy, _decoder = self.package_ops._animation_bone_candidates(root, bones)
+
+        self.assertEqual([candidate[0] for candidate in targeted], [left])
+        self.assertEqual(len(untargeted), 2)
+
     def test_channel_variant_selection_uses_parent_hierarchy_provenance(self) -> None:
         rear_parent = self._make_object("door_upper_anim_001_0_drak_clipper_landing_gear_rear", (0, 0, 0))
         rear_obj = self._make_object("door_upper_anim_001_14_swingarm_big_anim", (0, 0, 0))

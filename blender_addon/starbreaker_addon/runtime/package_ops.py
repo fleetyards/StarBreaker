@@ -3875,12 +3875,15 @@ def _select_animation_sample_decoder(
 def _animation_bone_candidates(
     package_root: bpy.types.Object,
     bones: dict[str, list[dict[str, Any]]],
+    target: Any = None,
 ) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool], str]:
     candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
     decisive_ids: set[int] = set()
 
     for obj in _iter_candidate_bone_objects(package_root):
+        if not _object_matches_clip_target(obj, target):
+            continue
         key = None
         variants = None
         for candidate_key in _object_bone_hash_keys(obj):
@@ -3914,6 +3917,46 @@ def _animation_bone_candidates(
     for obj_id in decisive_ids:
         policy.pop(obj_id, None)
     return candidates, policy, decoder
+
+
+def _object_matches_clip_target(obj: bpy.types.Object, target: Any) -> bool:
+    """Whether ``obj`` belongs to the scene instance a clip is restricted to.
+
+    A door's own clip carries a ``target`` naming its instance (entity, parent
+    entity and hardpoint): the Constellation GS airlocks share one mesh, so
+    without it opening the left airlock would open the right one too. Clips
+    without a target animate every matching object.
+    """
+    if not isinstance(target, dict) or not target:
+        return True
+    # A mesh's animated nodes are plain children; the instance record sits on
+    # the nearest ancestor that was placed for the scene instance.
+    current = obj
+    payload = None
+    for _ in range(64):
+        if current is None:
+            break
+        payload = current.get(PROP_INSTANCE_JSON)
+        if isinstance(payload, str):
+            break
+        current = current.parent
+    if not isinstance(payload, str):
+        return False
+    try:
+        instance = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(instance, dict):
+        return False
+    # scene.blend records name the mesh node in ``entity_name`` and the scene
+    # child in ``scene_entity_name``; importer records only have the latter's
+    # value, under ``entity_name``.
+    if instance.get("scene_entity_name"):
+        instance = {**instance, "entity_name": instance["scene_entity_name"]}
+    return all(
+        str(instance.get(key, "") or "") == str(value or "")
+        for key, value in target.items()
+    )
 
 
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
@@ -4200,7 +4243,9 @@ def _apply_animation_pose(
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
-    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(
+        package_root, bones, clip.get("target")
+    )
     updated = 0
     for obj, key, bind_data, channel in candidates:
         allow_position = position_policy.get(id(obj), True)
@@ -4338,7 +4383,9 @@ def _insert_animation_action(
         "driven_hashes": sorted(_clip_bone_hashes(clip)),
     }
 
-    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(
+        package_root, bones, clip.get("target")
+    )
     updated = 0
     # Multi-clip mode: when prior instances exist, clear live action from all
     # objects so NLA is the sole driver.  This covers the case where the first
