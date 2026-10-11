@@ -71,6 +71,9 @@ pub struct ExportOpts {
     /// matching the object-type folder the desktop app writes into
     #[arg(long)]
     pub package_subdir: Option<String>,
+    /// Put interiors into their own collection in the decomposed scene.blend
+    #[arg(long)]
+    pub separate_interior_collection: bool,
 }
 
 impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
@@ -112,6 +115,7 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
                 starbreaker_3d::ExportKind::Decomposed => opts.package_subdir.clone(),
                 starbreaker_3d::ExportKind::Bundled => None,
             },
+            separate_interior_collection: opts.separate_interior_collection,
         }
     }
 }

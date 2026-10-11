@@ -2230,6 +2230,7 @@ fn test_create_scene_blend_writes_decal_offset_modifier_for_decal_mesh_asset() {
         &[],
         &HashMap::new(),
         &decal_mesh_refs,
+        false,
     )
     .unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);

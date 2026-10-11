@@ -1373,6 +1373,7 @@ pub fn write_decomposed_export_blend(
         &extracted_lights,
         &light_projector_texture_map,
         &decal_mesh_refs,
+        opts.separate_interior_collection,
     )?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
@@ -3647,6 +3648,7 @@ fn create_scene_blend_package_with_instances(
         lights,
         light_projector_texture_map,
         &HashSet::new(),
+        false,
     )
 }
 
@@ -3657,6 +3659,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     lights: &[ExtractedLight],
     light_projector_texture_map: &HashMap<String, String>,
     decal_mesh_refs: &HashSet<(String, String)>,
+    separate_interior_collection: bool,
 ) -> Result<Vec<u8>, Error> {
     let children_count = mesh_instances_input.len();
     let mut used_light_names = HashMap::new();
@@ -3704,10 +3707,8 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     let root_collection_object_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
     
-    // Addon-style collections: an empty default collection, package collection,
-    // and package Interior child collection.
-    let default_collection_ptr = ptrs.alloc();
-    let default_layer_coll_ptr = ptrs.alloc();
+    // One package collection holding everything; with
+    // `separate_interior_collection` the interior goes into a child collection.
     let package_collection_ptr = ptrs.alloc();
     let package_layer_coll_ptr = ptrs.alloc();
     let interior_collection_ptr = ptrs.alloc();
@@ -4021,8 +4022,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         light_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
     }
     
-    // CollectionChild structs for the addon-style collection tree.
-    let default_coll_child_ptr = ptrs.alloc();
+    // CollectionChild structs for the collection tree.
     let package_coll_child_ptr = ptrs.alloc();
     let interior_coll_child_ptr = ptrs.alloc();
     
@@ -4053,6 +4053,11 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
             package_coll_obj_ptrs.push((*coll_obj_ptr, *empty_ptr));
         }
     }
+    if !separate_interior_collection {
+        package_coll_obj_ptrs.append(&mut interior_coll_obj_ptrs);
+    }
+    let interior_child_ptr = if separate_interior_collection { interior_coll_child_ptr } else { 0 };
+    let interior_layer_child_ptr = if separate_interior_collection { interior_layer_coll_ptr } else { 0 };
     let package_collection_head = package_coll_obj_ptrs.first().map(|entry| entry.0).unwrap_or(0);
     let package_collection_tail = package_coll_obj_ptrs.last().map(|entry| entry.0).unwrap_or(0);
     let interior_collection_head = interior_coll_obj_ptrs.first().map(|entry| entry.0).unwrap_or(0);
@@ -4063,16 +4068,15 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     let root_collection_data = build_master_collection(
         0,
         0,
-        default_coll_child_ptr,
+        package_coll_child_ptr,
         package_coll_child_ptr,
     );
-    let default_collection_data = build_collection("Collection", 0, 0, 0, 0);
     let package_collection_data = build_collection(
         &format!("StarBreaker {package_name}"),
         package_collection_head,
         package_collection_tail,
-        interior_coll_child_ptr,
-        interior_coll_child_ptr,
+        interior_child_ptr,
+        interior_child_ptr,
     );
     let interior_collection_data = build_collection(
         &format!("StarBreaker {package_name} Interior"),
@@ -4081,13 +4085,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         0,
         0,
     );
-    let default_coll_child_data =
-        build_collection_object_linked(default_collection_ptr, 0, package_coll_child_ptr);
-    let package_coll_child_data = build_collection_object_linked(
-        package_collection_ptr,
-        default_coll_child_ptr,
-        0,
-    );
+    let package_coll_child_data = build_collection_object_linked(package_collection_ptr, 0, 0);
     let interior_coll_child_data =
         build_collection_object_linked(interior_collection_ptr, 0, 0);
 
@@ -4095,22 +4093,15 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         root_collection_ptr,  // Collection pointer
         0,                    // prev = NULL (root has no siblings)
         0,                    // next = NULL (root has no siblings)
-        default_layer_coll_ptr,
         package_layer_coll_ptr,
-    );
-    let default_layer_coll_data = build_layer_collection_linked(
-        default_collection_ptr,
-        0,
         package_layer_coll_ptr,
-        0,
-        0,
     );
     let package_layer_coll_data = build_layer_collection_linked(
         package_collection_ptr,
-        default_layer_coll_ptr,
         0,
-        interior_layer_coll_ptr,
-        interior_layer_coll_ptr,
+        0,
+        interior_layer_child_ptr,
+        interior_layer_child_ptr,
     );
     let interior_layer_coll_data = build_layer_collection_linked(
         interior_collection_ptr,
@@ -4438,25 +4429,26 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &root_layer_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, default_layer_coll_ptr, 1, &default_layer_coll_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, package_layer_coll_ptr, 1, &package_layer_coll_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, interior_layer_coll_ptr, 1, &interior_layer_coll_data);
+    if separate_interior_collection {
+        write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, interior_layer_coll_ptr, 1, &interior_layer_coll_data);
+    }
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);  // embedded master_collection
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, default_coll_child_ptr, 1, &default_coll_child_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, package_coll_child_ptr, 1, &package_coll_child_data);
     // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
 
 
-    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, default_collection_ptr, 1, &default_collection_data);
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, package_collection_ptr, 1, &package_collection_data);
     for (coll_obj_ptr, coll_obj_data) in &package_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, interior_coll_child_ptr, 1, &interior_coll_child_data);
-    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, interior_collection_ptr, 1, &interior_collection_data);
-    for (coll_obj_ptr, coll_obj_data) in &interior_coll_obj_data_list {
-        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+    if separate_interior_collection {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, interior_coll_child_ptr, 1, &interior_coll_child_data);
+        write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, interior_collection_ptr, 1, &interior_collection_data);
+        for (coll_obj_ptr, coll_obj_data) in &interior_coll_obj_data_list {
+            write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+        }
     }
 
     // Write package/entity root empty objects + properties/material arrays.

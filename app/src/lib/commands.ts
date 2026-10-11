@@ -162,6 +162,7 @@ export interface ExportRequest {
   include_nodraw: boolean;
   include_animations: boolean;
   include_object_type_directory: boolean;
+  separate_interior_collection: boolean;
 }
 
 export interface ExportProgress {

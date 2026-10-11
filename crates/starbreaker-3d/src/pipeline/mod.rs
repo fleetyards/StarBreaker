@@ -134,6 +134,9 @@ pub struct ExportOptions {
     /// Example: `ship` writes manifests to `Packages/ship/<package>/...` while
     /// still keeping shared assets under `Data/...`.
     pub decomposed_package_subdir: Option<String>,
+    /// Put interior objects of a decomposed scene.blend into their own
+    /// `<package> Interior` collection instead of the package collection.
+    pub separate_interior_collection: bool,
 }
 
 impl Default for ExportOptions {
@@ -154,6 +157,7 @@ impl Default for ExportOptions {
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
+            separate_interior_collection: false,
         }
     }
 }
