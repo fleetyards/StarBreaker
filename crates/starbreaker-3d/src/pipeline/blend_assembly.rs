@@ -232,16 +232,14 @@ fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -
 /// Determine the Blender Displace modifier strength for the decal-offset pass on
 /// a scene instance.
 ///
-/// Interior instances (and all loadout items parented inside the interior) use a
-/// smaller offset (0.001) because interior geometry is scaled more tightly and a
-/// 0.005 offset causes visible lifting on flat panels.  Exterior hull meshes use
-/// 0.005 to clear the thicker paint/decal stacking that occurs on the outside of
-/// the ship.
+/// Decal geometry is authored 0.2-1 mm above the hull; the offset only has to
+/// keep coplanar decals from flickering into it. Exterior hull meshes used
+/// 5 mm, which made the Constellation's and Skylark's decals visibly float.
 ///
 /// Decision tree:
 /// 1. `is_interior == true` → **0.001** (interior geometry + interior loadout)
 /// 2. `material_sidecar` path contains `/ships/` and does **not** contain `_int_`
-///    → **0.005** (exterior hull)
+///    → **0.0005** (exterior hull)
 /// 3. Everything else (exterior loadout/accessories) → **0.001**
 fn instance_decal_offset_strength(instance: &LinkedMeshInstance) -> f64 {
     if instance.is_interior {
@@ -250,7 +248,7 @@ fn instance_decal_offset_strength(instance: &LinkedMeshInstance) -> f64 {
     if let Some(sidecar) = &instance.material_sidecar {
         let lower = sidecar.to_lowercase();
         if lower.contains("/ships/") && !lower.contains("_int_") && !lower.contains("_int_master") {
-            return 0.005;
+            return 0.0005;
         }
     }
     0.001
@@ -1785,7 +1783,7 @@ fn mesh_to_blend_flat(
                 DECAL_OFFSET_MODIFIER_NAME,
                 0,
                 wn_mod_ptr,
-                0.005,
+                0.0005,
                 DECAL_OFFSET_GROUP_NAME,
                 DECAL_OFFSET_MIDLEVEL,
             ));
@@ -3091,7 +3089,7 @@ fn write_mesh_block(
                 DECAL_OFFSET_MODIFIER_NAME,
                 0,
                 block.wn_mod_ptr,
-                0.005,
+                0.0005,
                 DECAL_OFFSET_GROUP_NAME,
                 DECAL_OFFSET_MIDLEVEL,
             ));

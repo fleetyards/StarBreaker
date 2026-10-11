@@ -248,7 +248,7 @@ fn mesh_to_blend_exports_decal_offset_displace_modifier_for_decal_vertex_group()
     assert_eq!(displace.old_ptr, last_modifier_ptr);
     assert_eq!(cstr_at(displace.data, 40, 64), DECAL_OFFSET_MODIFIER_NAME);
     assert_eq!(cstr_at(displace.data, 288, 64), DECAL_OFFSET_GROUP_NAME);
-    assert!((f32::from_le_bytes(displace.data[280..284].try_into().unwrap()) - 0.005).abs() < 0.000001);
+    assert!((f32::from_le_bytes(displace.data[280..284].try_into().unwrap()) - 0.0005).abs() < 0.000001);
 }
 
 #[test]
@@ -2244,7 +2244,7 @@ fn test_create_scene_blend_writes_decal_offset_modifier_for_decal_mesh_asset() {
     assert_eq!(displace.old_ptr, last_modifier_ptr);
     assert_eq!(cstr_at(displace.data, 40, 64), DECAL_OFFSET_MODIFIER_NAME);
     assert_eq!(cstr_at(displace.data, 288, 64), DECAL_OFFSET_GROUP_NAME);
-    assert!((f32::from_le_bytes(displace.data[280..284].try_into().unwrap()) - 0.005).abs() < 0.000001);
+    assert!((f32::from_le_bytes(displace.data[280..284].try_into().unwrap()) - 0.0005).abs() < 0.000001);
 }
 
 #[test]
