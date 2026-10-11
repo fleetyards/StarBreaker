@@ -184,6 +184,7 @@ class OrchestrationMixin:
         self._ensure_runtime_channel_split_group()
         self._ensure_runtime_smoothness_roughness_group()
         self._ensure_runtime_color_to_luma_group()
+        self._ensure_runtime_specular_map_luma_group()
         self._ensure_runtime_shadowless_wrapper_group()
         self.runtime_shared_groups_ready = True
 

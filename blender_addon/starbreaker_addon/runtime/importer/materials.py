@@ -309,9 +309,9 @@ class MaterialsMixin:
         if image_node is None:
             return None
         group_node = nodes.new("ShaderNodeGroup")
-        group_node.node_tree = self._ensure_runtime_color_to_luma_group()
+        group_node.node_tree = self._ensure_runtime_specular_map_luma_group()
         group_node.location = (x + 180, y)
-        group_node.label = "StarBreaker Color To Luma"
+        group_node.label = "StarBreaker Specular Map Luma"
         image_node.id_data.links.new(image_node.outputs[0], group_node.inputs["Color"])
         return group_node.outputs["Luma"]
 

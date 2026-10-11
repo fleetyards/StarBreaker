@@ -2263,6 +2263,54 @@ class GroupsMixin:
         group_tree["starbreaker_runtime_built_signature"] = "color_to_luma_v1"
         return group_tree
 
+    def _ensure_runtime_specular_map_luma_group(self) -> bpy.types.ShaderNodeTree:
+        """Decode an sRGB-encoded specular (F0) map to a linear reflectance.
+
+        CryEngine stores ``_spec`` maps in sRGB, while the image is sampled
+        as Non-Color. Without the decode a mid-grey 129 reads as F0 0.51
+        instead of ~0.22, which turns the Constellation's POM decal panels
+        into near-mirrors.
+        """
+        self._invalidate_runtime_group_if_unexpected(
+            "StarBreaker Runtime Specular Map Luma",
+            "specular_map_luma_v1",
+            {
+                "NodeGroupInput": 1,
+                "NodeGroupOutput": 1,
+                "ShaderNodeGamma": 1,
+                "ShaderNodeRGBToBW": 1,
+            },
+        )
+        group_tree, group_input, group_output = self._begin_runtime_shared_group(
+            "StarBreaker Runtime Specular Map Luma",
+            signature="specular_map_luma_v1",
+            inputs=[
+                ("Color", "NodeSocketColor"),
+            ],
+            outputs=[
+                ("Luma", "NodeSocketFloat"),
+            ],
+        )
+        if group_tree.get("starbreaker_runtime_built_signature") == "specular_map_luma_v1":
+            return group_tree
+        nodes = group_tree.nodes
+        links = group_tree.links
+
+        _set_group_input_default(group_input, "Color", (1.0, 1.0, 1.0, 1.0))
+
+        srgb_decode = nodes.new("ShaderNodeGamma")
+        srgb_decode.location = (-200, 0)
+        srgb_decode.inputs["Gamma"].default_value = 2.2
+        links.new(_output_socket(group_input, "Color"), srgb_decode.inputs["Color"])
+
+        rgb_to_bw = nodes.new("ShaderNodeRGBToBW")
+        rgb_to_bw.location = (0, 0)
+        links.new(srgb_decode.outputs[0], rgb_to_bw.inputs[0])
+        links.new(rgb_to_bw.outputs[0], group_output.inputs["Luma"])
+
+        group_tree["starbreaker_runtime_built_signature"] = "specular_map_luma_v1"
+        return group_tree
+
     def _ensure_runtime_shadowless_wrapper_group(self) -> bpy.types.ShaderNodeTree:
         """Wrap a shader in a shadow-ray → transparent mix.
 

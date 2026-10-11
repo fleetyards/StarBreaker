@@ -82,6 +82,7 @@ _RUNTIME_GROUP_PREFIXES: tuple[str, ...] = (
     "StarBreaker Runtime Channel Split",
     "StarBreaker Runtime Smoothness To Roughness",
     "StarBreaker Runtime Color To Luma",
+    "StarBreaker Runtime Specular Map Luma",
     "StarBreaker Runtime POM Detail",
     "StarBreaker Runtime Shadowless Wrapper",
     "StarBreaker Wear Input",
