@@ -94,6 +94,22 @@ impl ChrParams {
         self.animations.entry(key).or_insert(value);
     }
 
+    /// Resolved path of the `.caf` the engine plays for `name`.
+    ///
+    /// An event can be declared more than once, and a later declaration
+    /// overrides an earlier one: the Constellation GS rear gear 3/4 declare
+    /// `landing_gear_deploy` first with their compress CAF and then with the
+    /// real deploy CAF, and in-game the gear retracts with the deploy CAF.
+    /// Declarations whose file does not `exist` are skipped.
+    pub fn effective_caf_path(&self, name: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
+        self.animation_paths
+            .get(name)?
+            .iter()
+            .rev()
+            .map(|path| self.resolved_caf_path(path))
+            .find(|resolved| exists(resolved))
+    }
+
     /// Resolve a relative `.caf` path against the `#filepath` prefix.
     /// If the path is already absolute (contains `/` or `\\` mid-string),
     /// returns it as-is. Otherwise prepends the prefix.
@@ -206,4 +222,37 @@ mod tests {
                         Some(&vec!["door_open_a.caf".to_string(), "door_open_b.caf".to_string()])
                 );
         }
+
+    #[test]
+    fn later_declaration_of_an_event_overrides_the_earlier_one() {
+        // Constellation GS rear gear 3/4: `landing_gear_deploy` is declared
+        // first with the gear's compress CAF, then with the deploy CAF.
+        let mut parsed = ChrParams::default();
+        parsed.filepath_prefix = Some("Animations/LandingGear".to_string());
+        parsed.record_animation_path("landing_gear_deploy", "rear_3_compress.caf");
+        parsed.record_animation_path("landing_gear_compress", "rear_3_compress.caf");
+        parsed.record_animation_path("landing_gear_deploy", "rear_3_deploy.caf");
+        let both_exist = |_: &str| true;
+
+        assert_eq!(
+            parsed.effective_caf_path("landing_gear_deploy", both_exist),
+            Some("Animations/LandingGear/rear_3_deploy.caf".to_string())
+        );
+        assert_eq!(
+            parsed.effective_caf_path("landing_gear_compress", both_exist),
+            Some("Animations/LandingGear/rear_3_compress.caf".to_string())
+        );
+    }
+
+    #[test]
+    fn a_declaration_without_a_file_falls_back_to_the_earlier_one() {
+        let mut parsed = ChrParams::default();
+        parsed.record_animation_path("door_open", "door_open_a.caf");
+        parsed.record_animation_path("door_open", "door_open_missing.caf");
+
+        assert_eq!(
+            parsed.effective_caf_path("door_open", |path| path == "door_open_a.caf"),
+            Some("door_open_a.caf".to_string())
+        );
+    }
 }

@@ -634,11 +634,13 @@ pub fn extract_animations_for_skeleton_json(
         return Ok(None);
     }
     let mut clips = Vec::new();
-    for (event_name, caf_path) in &chrparams.animations {
-        let resolved_path = chrparams.resolved_caf_path(caf_path);
-        let resolved_p4k = crate::pipeline::datacore_path_to_p4k(&resolved_path);
-        let Some(caf_data) = p4k
-            .entry_case_insensitive(&resolved_p4k)
+    for event_name in chrparams.animation_paths.keys() {
+        let caf_entry = |resolved: &str| {
+            p4k.entry_case_insensitive(&crate::pipeline::datacore_path_to_p4k(resolved))
+        };
+        let Some(caf_data) = chrparams
+            .effective_caf_path(event_name, |resolved| caf_entry(resolved).is_some())
+            .and_then(|resolved| caf_entry(&resolved))
             .and_then(|e| p4k.read(e).ok())
         else {
             continue;
