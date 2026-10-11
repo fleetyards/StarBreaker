@@ -499,10 +499,42 @@ class BuildersMixin:
         return group
 
     def _patch_glass_template_lightpath(self, group: bpy.types.ShaderNodeTree) -> None:
-        """Patch the bundled GlassPBR template to the live validated graph."""
-        if group.get("starbreaker_glass_lightpath_patch_version") == 4:
+        """Patch the bundled GlassPBR template to the live validated graph.
+
+        Roughness comes from the authored ``RefractionGloss`` (1 = clear),
+        with the wear gloss texture mixed in by ``WearBlendBase``. TexSlot6
+        holds the gloss of the worn layer only: used as the glass gloss, the
+        Constellation canopy (``glass_canopy_gloss``, ~0.5) rendered as
+        frosted glass while it is authored clear.
+        """
+        if group.get("starbreaker_glass_lightpath_patch_version") == 5:
             return
-        ddna_group = self._ensure_runtime_ddna_roughness_group()
+        for socket_name, default in (("Param_RefractionGloss", 1.0), ("Param_WearBlendBase", 0.0)):
+            existing = next(
+                (
+                    item
+                    for item in group.interface.items_tree
+                    if getattr(item, "item_type", "") == "SOCKET"
+                    and item.in_out == "INPUT"
+                    and item.name == socket_name
+                ),
+                None,
+            )
+            if existing is None:
+                existing = group.interface.new_socket(name=socket_name, in_out="INPUT", socket_type="NodeSocketFloat")
+            existing.default_value = default
+        wear_gloss_item = next(
+            (
+                item
+                for item in group.interface.items_tree
+                if getattr(item, "item_type", "") == "SOCKET"
+                and item.in_out == "INPUT"
+                and item.name == "TexSlot6_WearGloss"
+            ),
+            None,
+        )
+        if wear_gloss_item is not None and hasattr(wear_gloss_item, "default_value"):
+            wear_gloss_item.default_value = (1.0, 1.0, 1.0, 1.0)
         nodes = group.nodes
         links = group.links
         group_input = next((n for n in nodes if n.bl_idname == "NodeGroupInput"), None)
@@ -529,16 +561,18 @@ class BuildersMixin:
         normal_map.space = "TANGENT"
         normal_map.inputs["Strength"].default_value = 0.25
 
-        map_range = nodes.new("ShaderNodeMapRange")
-        map_range.name = "Map Range"
-        map_range.location = (790.1220703125, -230.03060913085938)
-        map_range.data_type = "FLOAT"
-        map_range.interpolation_type = "LINEAR"
-        map_range.clamp = True
-        map_range.inputs[1].default_value = 0.0
-        map_range.inputs[2].default_value = 0.8000000715255737
-        map_range.inputs[3].default_value = 0.07000000029802322
-        map_range.inputs[4].default_value = 1.0
+        gloss_mix = nodes.new("ShaderNodeMix")
+        gloss_mix.name = "Wear Gloss Mix"
+        gloss_mix.data_type = "FLOAT"
+        gloss_mix.clamp_factor = True
+        gloss_mix.location = (474.0, -230.0)
+
+        gloss_to_roughness = nodes.new("ShaderNodeMath")
+        gloss_to_roughness.name = "Gloss To Roughness"
+        gloss_to_roughness.operation = "SUBTRACT"
+        gloss_to_roughness.use_clamp = True
+        gloss_to_roughness.inputs[0].default_value = 1.0
+        gloss_to_roughness.location = (790.0, -230.0)
 
         hue_saturation = nodes.new("ShaderNodeHueSaturation")
         hue_saturation.name = "Hue/Saturation/Value"
@@ -560,21 +594,17 @@ class BuildersMixin:
 
         maths = nodes.new("ShaderNodeMath")
         maths.name = "Maths"
-        maths.location = (478.7479553222656, -291.1023254394531)
+        maths.location = (1040.0, -230.0)
         maths.operation = "MULTIPLY"
-        maths.use_clamp = False
-
-        roughness_group = nodes.new("ShaderNodeGroup")
-        roughness_group.name = "StarBreaker Runtime DDNA Roughness"
-        roughness_group.location = (193.330810546875, -532.6305541992188)
-        roughness_group.node_tree = ddna_group
+        maths.use_clamp = True
 
         tint_color_socket = _output_socket(group_input, "TexSlot4_TintColor")
         palette_glass_socket = _output_socket(group_input, "Palette_Glass")
         normal_socket = _output_socket(group_input, "TexSlot2_NormalGloss")
         smoothness_socket = _output_socket(group_input, "TexSlot6_WearGloss")
         dirt_socket = _output_socket(group_input, "TexSlot11_Dirt")
-        roughness_socket = _output_socket(roughness_group, "Roughness") or roughness_group.outputs[0]
+        refraction_gloss_socket = _output_socket(group_input, "Param_RefractionGloss")
+        wear_blend_socket = _output_socket(group_input, "Param_WearBlendBase")
         shader_output_socket = _output_socket(principled, "BSDF") or principled.outputs[0]
         if (
             tint_color_socket is None
@@ -582,6 +612,8 @@ class BuildersMixin:
             or normal_socket is None
             or smoothness_socket is None
             or dirt_socket is None
+            or refraction_gloss_socket is None
+            or wear_blend_socket is None
         ):
             return
 
@@ -589,16 +621,18 @@ class BuildersMixin:
         links.new(palette_glass_socket, mix_legacy.inputs[2])
         links.new(normal_socket, normal_map.inputs["Color"])
         links.new(_output_socket(mix_legacy, "Color") or mix_legacy.outputs[0], hue_saturation.inputs["Color"])
-        links.new(_output_socket(map_range, "Result") or map_range.outputs[0], _input_socket(principled, "Roughness"))
         links.new(shader_output_socket, shader_input)
-        links.new(smoothness_socket, _input_socket(roughness_group, "Smoothness") or roughness_group.inputs[0])
-        links.new(roughness_socket, maths.inputs[0])
+        links.new(wear_blend_socket, gloss_mix.inputs["Factor"])
+        links.new(refraction_gloss_socket, gloss_mix.inputs["A"])
+        links.new(smoothness_socket, gloss_mix.inputs["B"])
+        links.new(gloss_mix.outputs["Result"], gloss_to_roughness.inputs[1])
+        links.new(_output_socket(gloss_to_roughness, "Value") or gloss_to_roughness.outputs[0], maths.inputs[0])
         links.new(dirt_socket, maths.inputs[1])
-        links.new(_output_socket(maths, "Value") or maths.outputs[0], map_range.inputs[0])
+        links.new(_output_socket(maths, "Value") or maths.outputs[0], _input_socket(principled, "Roughness"))
         links.new(_output_socket(hue_saturation, "Color") or hue_saturation.outputs[0], _input_socket(principled, "Base Color"))
         links.new(_output_socket(normal_map, "Normal") or normal_map.outputs[0], _input_socket(principled, "Normal"))
         group["starbreaker_glass_lightpath_patched"] = 1
-        group["starbreaker_glass_lightpath_patch_version"] = 4
+        group["starbreaker_glass_lightpath_patch_version"] = 5
 
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:

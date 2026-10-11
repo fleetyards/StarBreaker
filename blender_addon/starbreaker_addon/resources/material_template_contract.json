@@ -295,6 +295,22 @@
           "semantic": "condensation_normal",
           "socket_type": "NodeSocketColor",
           "source_slot": "TexSlot15"
+        },
+        {
+          "default_value": 1.0,
+          "name": "Param_RefractionGloss",
+          "required": false,
+          "semantic": "public_param_refractiongloss",
+          "socket_type": "NodeSocketFloat",
+          "source_slot": null
+        },
+        {
+          "default_value": 0.0,
+          "name": "Param_WearBlendBase",
+          "required": false,
+          "semantic": "public_param_wearblendbase",
+          "socket_type": "NodeSocketFloat",
+          "source_slot": null
         }
       ],
       "metadata": {
