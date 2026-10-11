@@ -412,7 +412,17 @@ fn resolve_sub_geometry(idx: &EntityIndex, children: &mut [LoadoutNode]) {
         if !should_attempt_sub_geometry_resolution(child.geometry_path.as_deref(), &variants) {
             continue;
         }
-        if let Some(m) = match_sub_geometry_variant(&variants, &child.port_tags, child.helper_bone_name.as_deref(), &child.item_port_name) {
+        let matched = if variants_belong_to_item(child.geometry_path.as_deref(), &variants) {
+            match_sub_geometry_variant(&variants, &child.port_tags, child.helper_bone_name.as_deref(), &child.item_port_name)
+        } else {
+            log::debug!(
+                "  SubGeometry: {} variants are not its own geometry {}; matching port tags only",
+                child.entity_name,
+                child.geometry_path.as_deref().unwrap_or("")
+            );
+            match_sub_geometry_variant(&variants, &child.port_tags, None, "")
+        };
+        if let Some(m) = matched {
             log::debug!("  SubGeometry: {} tag='{}' -> {}", child.entity_name, m.tag, m.geometry_path);
             child.geometry_path = Some(m.geometry_path.clone());
             if !m.material_path.is_empty() { child.material_path = Some(m.material_path.clone()); }
@@ -480,6 +490,38 @@ fn should_attempt_sub_geometry_resolution(
 /// and taking those replaced the Carrack's own engines with 600i parts.
 fn needs_variant_fallback(geometry_path: Option<&str>) -> bool {
     geometry_path.is_none_or(|path| path.trim().is_empty())
+}
+
+/// Whether an item's SubGeometry variants are alternatives to its own mesh.
+///
+/// The Merlin's left wing was cloned from the 350R winglet and kept all six
+/// winglet variants next to its own wing mesh; matching `hardpoint_wing_left`
+/// against them swapped the Merlin wing for the 350R's. Variants are often
+/// meshes other than the default (the Bengal's engines default to a generic
+/// thruster and pick left/right hull meshes), so the tell is the
+/// manufacturer: variants from another manufacturer's folder than the item's
+/// own mesh are leftovers, and only explicit port tags may pick one.
+fn variants_belong_to_item(geometry_path: Option<&str>, variants: &[SubGeometryVariant]) -> bool {
+    let Some(own) = geometry_path.and_then(geometry_manufacturer) else {
+        return true;
+    };
+    variants.iter().any(|variant| {
+        geometry_manufacturer(&variant.geometry_path).is_none_or(|maker| maker == own)
+    })
+}
+
+/// Manufacturer folder of a ship part mesh:
+/// `objects/spaceships/<category>/<manufacturer>/...`.
+fn geometry_manufacturer(path: &str) -> Option<String> {
+    let normalized = path.trim().replace('\\', "/").to_ascii_lowercase();
+    let mut segments = normalized.split('/').filter(|segment| !segment.is_empty());
+    if segments.next()? != "objects" || segments.next()? != "spaceships" {
+        return None;
+    }
+    segments.next()?;
+    let manufacturer = segments.next()?;
+    // A mesh directly in the category folder has no manufacturer folder.
+    (!manufacturer.contains('.')).then(|| manufacturer.to_string())
 }
 
 fn has_multiple_geometry_variants(variants: &[SubGeometryVariant]) -> bool {
@@ -886,6 +928,40 @@ mod tests {
                 .unwrap_or_else(|| panic!("{port} should match a variant"));
             assert_eq!(matched.tag, tag, "{port}");
         }
+    }
+
+    #[test]
+    fn variants_from_another_manufacturer_are_leftovers() {
+        let variant = |tag: &str, path: &str| SubGeometryVariant {
+            tag: tag.to_string(),
+            geometry_path: path.to_string(),
+            material_path: String::new(),
+        };
+        let winglets = vec![
+            variant("wing left", "objects/spaceships/ships/orig/300_series/orig_350r_winglet_wing_left.cga"),
+            variant("wing right", "objects/spaceships/ships/orig/300_series/orig_350r_winglet_wing_right.cga"),
+        ];
+        // Merlin left wing: its own KRIG mesh, with the 350R winglets left over.
+        assert!(!variants_belong_to_item(
+            Some("objects/spaceships/ships/krig/p52_merlin/krig_p52_merlin_wing_left.cga"),
+            &winglets
+        ));
+        // 350R winglet.
+        assert!(variants_belong_to_item(
+            Some("Objects\\Spaceships\\Ships\\ORIG\\300_series\\orig_350r_winglet_nose_left.cga"),
+            &winglets
+        ));
+        assert!(variants_belong_to_item(None, &winglets));
+
+        // Bengal engines: generic default thruster, hull-specific variants.
+        let bengal = vec![
+            variant("l", "objects/spaceships/ships/rsi/bengal/exterior/rsi_bengal_engine_main_l.cga"),
+            variant("r", "objects/spaceships/ships/rsi/bengal/exterior/rsi_bengal_engine_main_r.cga"),
+        ];
+        assert!(variants_belong_to_item(
+            Some("objects/spaceships/thrusters/rsi/bengal/bengal_engine_small.cga"),
+            &bengal
+        ));
     }
 
     #[test]
