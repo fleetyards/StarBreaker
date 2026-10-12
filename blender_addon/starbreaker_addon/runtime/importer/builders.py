@@ -2674,32 +2674,60 @@ class BuildersMixin:
                 return (float(r), float(g), float(b))
         return fallback
 
+    #: Bumped whenever the Illum POM host variant wiring changes, so clones
+    #: saved by an older addon are rebuilt instead of reused.
+    _ILLUM_POM_HOST_VARIANT_VERSION = 2
+
     def _ensure_illum_pom_host_rgb_variant(
         self,
         material: bpy.types.Material,
         rgb: tuple[float, float, float],
+        host_specular: float | None = None,
     ) -> bpy.types.Material:
-        """Clone an Illum POM decal material and tint its runtime
-        LayerSurface inputs with a fixed host RGB.
+        """Clone an Illum POM decal material and give it the host panel's
+        colour and reflectance.
 
-        This mirrors the MeshDecal host-RGB fallback for decal materials
-        that are authored as ``Illum`` + ``DECAL`` + ``POM`` rather than
-        ``MeshDecal``. Those materials still need to inherit the host
-        panel colour instead of rendering their white decal atlas at face
-        value.
+        This mirrors the MeshDecal host variants for decal materials that
+        are authored as ``Illum`` + ``DECAL`` + ``POM`` rather than
+        ``MeshDecal``. The decal atlas is white with a metal-like spec map
+        (F0 ~0.22): rendered at face value the recessed hull panels (e.g.
+        the Constellation's VTOL hatch insets) show up as bright white
+        patches. The clone keeps the decal's normal, gloss and parallax but
+        takes the host tint and the host's dielectric reflectance.
         """
         if material is None or material.node_tree is None:
             return material
         rgb_key = self._rgb_variant_key(rgb)
+        specular = 0.04 if host_specular is None else max(0.0, min(1.0, float(host_specular)))
         base_material = self._decal_host_variant_base_material(material)
         clone_name = f"{self._decal_host_variant_base_name(material)}__host_rgb_{rgb_key}"
         clone = bpy.data.materials.get(clone_name)
-        if clone is not None and clone.get("starbreaker_decal_host_rgb_key") == rgb_key:
+        if (
+            clone is not None
+            and clone.get("starbreaker_decal_host_rgb_key") == rgb_key
+            and clone.get("starbreaker_decal_host_variant_version") == self._ILLUM_POM_HOST_VARIANT_VERSION
+            and abs(float(clone.get("starbreaker_decal_host_specular", -1.0)) - specular) < 1e-6
+        ):
             return clone
         if clone is None:
             clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_rgb_key"] = rgb_key
+        clone["starbreaker_decal_host_variant_version"] = self._ILLUM_POM_HOST_VARIANT_VERSION
+        clone["starbreaker_decal_host_specular"] = specular
+
+        links = clone.node_tree.links
+
+        def _set_unlinked(node: bpy.types.Node, name: str, value: Any) -> None:
+            socket = node.inputs.get(name)
+            if socket is None:
+                return
+            for link in list(socket.links):
+                links.remove(link)
+            try:
+                socket.default_value = value
+            except Exception:
+                pass
 
         for node in clone.node_tree.nodes:
             if node.bl_idname != "ShaderNodeGroup":
@@ -2707,14 +2735,16 @@ class BuildersMixin:
             tree = getattr(node, "node_tree", None)
             if tree is None or tree.name != "StarBreaker Runtime LayerSurface":
                 continue
-            tint_socket = node.inputs.get("Tint Color")
-            if tint_socket is not None:
-                for link in list(tint_socket.links):
-                    clone.node_tree.links.remove(link)
-                try:
-                    tint_socket.default_value = (rgb[0], rgb[1], rgb[2], 1.0)
-                except Exception:
-                    pass
+            _set_unlinked(node, "Tint Color", (rgb[0], rgb[1], rgb[2], 1.0))
+            # The host tint already carries the palette colour; a black
+            # palette input (no material channel) would zero it out. A
+            # white host means no host colour was found, so leave those
+            # panels dark rather than rendering the white atlas.
+            if tuple(round(float(c), 6) for c in rgb[:3]) != (1.0, 1.0, 1.0):
+                _set_unlinked(node, "Palette Color", (1.0, 1.0, 1.0, 1.0))
+            _set_unlinked(node, "Specular Value", 0.0)
+            _set_unlinked(node, "Metallic", 0.0)
+            _set_unlinked(node, "Palette Specular", specular)
         return clone
 
     def _ensure_mesh_decal_host_variant(
@@ -2888,20 +2918,22 @@ class BuildersMixin:
                 variant = self._ensure_mesh_decal_host_variant(mat, channel, palette)
             else:
                 variant_rgb = None
+                host_specular = None
                 if channel is not None and palette is not None:
                     variant_rgb = palette_color(palette, channel)
+                    host_specular = _mean_triplet(palette_finish_specular(palette, channel))
                 if variant_rgb is None:
                     variant_rgb = resolved_fallback_rgb
                 if variant_rgb is None:
                     continue
                 key = mat.get("starbreaker_decal_host_rgb_key")
                 rgb_key = self._rgb_variant_key(variant_rgb)
-                if key == rgb_key:
-                    continue
                 if is_mesh_decal:
+                    if key == rgb_key:
+                        continue
                     variant = self._ensure_mesh_decal_host_rgb_variant(mat, variant_rgb)
                 else:
-                    variant = self._ensure_illum_pom_host_rgb_variant(mat, variant_rgb)
+                    variant = self._ensure_illum_pom_host_rgb_variant(mat, variant_rgb, host_specular)
             if variant is not mat:
                 slot.material = variant
                 rebound += 1
