@@ -303,23 +303,25 @@ fn remove_root_geometry_duplicate_interior_placements(
     removed
 }
 
+/// A container's `Offset` is its placement in the root entity's space; the
+/// `boneName` helper only decides which node it moves with. So the
+/// root-space transform is the offset itself, whatever the helper.
 fn compose_root_container_transform(
     offset_position: [f32; 3],
     offset_rotation: [f32; 3],
-    helper_transform: Option<glam::Mat4>,
+    _helper_transform: Option<glam::Mat4>,
 ) -> [[f32; 4]; 4] {
-    let offset = mat4_from_array(&crate::socpak::build_container_transform(
-        offset_position,
-        offset_rotation,
-    ));
-    let base = match helper_transform {
-        Some(helper_transform) if helper_transform_duplicates_offset(helper_transform, offset) => offset,
-        Some(helper_transform) => helper_transform * offset,
-        None => offset,
-    };
-    mat4_to_array(base)
+    crate::socpak::build_container_transform(offset_position, offset_rotation)
 }
 
+/// The container's transform relative to its helper node: the root-space
+/// offset expressed in the helper's frame.
+///
+/// Usually the offset repeats the helper's own position (identity here), but
+/// variants reuse containers authored for a sibling hull: the Phoenix GS
+/// hangs the Andromeda's comp bays (offset y=19.75) off its own
+/// `hardpoint_int_cockpit` (y=23.25). Stacking the offset on the helper put
+/// them ~20 m past the nose.
 fn compose_helper_relative_container_transform(
     offset_position: [f32; 3],
     offset_rotation: [f32; 3],
@@ -333,7 +335,8 @@ fn compose_helper_relative_container_transform(
         Some(helper_transform) if helper_transform_duplicates_offset(helper_transform, offset) => {
             glam::Mat4::IDENTITY
         }
-        Some(_) | None => offset,
+        Some(helper_transform) => helper_transform.inverse() * offset,
+        None => offset,
     };
     mat4_to_array(local)
 }
@@ -1338,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_root_container_transform_composes_full_helper_transform() {
+    fn compose_root_container_transform_keeps_root_space_offset_for_distinct_helper() {
         let helper_transform = glam::Mat4::from_rotation_translation(
             glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
             glam::Vec3::new(1.0, 2.0, 3.0),
@@ -1349,11 +1352,10 @@ mod tests {
             Some(helper_transform),
         );
         let transform = mat4_from_array(&transform);
-        let expected = helper_transform
-            * mat4_from_array(&crate::socpak::build_container_transform(
-                [2.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0],
-            ));
+        let expected = mat4_from_array(&crate::socpak::build_container_transform(
+            [2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ));
         let actual = transform.to_cols_array();
         let expected = expected.to_cols_array();
         for (actual, expected) in actual.iter().zip(expected.iter()) {
@@ -1427,17 +1429,20 @@ mod tests {
     }
 
     #[test]
-    fn compose_helper_relative_container_transform_keeps_offset_for_distinct_helper() {
-        let helper = glam::Mat4::from_translation(glam::Vec3::new(0.0, 20.0, 0.0));
+    fn compose_helper_relative_container_transform_expresses_offset_in_distinct_helper_frame() {
+        // Phoenix GS: Andromeda comp bay (offset y=19.75) on the Phoenix's
+        // hardpoint_int_cockpit (y=23.25) must stay at y=19.75 in ship space.
+        let helper = glam::Mat4::from_translation(glam::Vec3::new(0.0, 23.25, 3.25));
         let transform = compose_helper_relative_container_transform(
-            [0.0, 35.0, 0.0],
+            [0.0, 19.75, 3.0],
             [0.0, 0.0, 0.0],
             Some(helper),
         );
         let transform = mat4_from_array(&transform);
-        let expected = mat4_from_array(&crate::socpak::build_container_transform(
-            [0.0, 35.0, 0.0],
-            [0.0, 0.0, 0.0],
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(0.0, -3.5, -0.25));
+        assert!((helper * transform).transform_point3(glam::Vec3::ZERO).abs_diff_eq(
+            glam::Vec3::new(0.0, 19.75, 3.0),
+            1e-5
         ));
         let actual = transform.to_cols_array();
         let expected = expected.to_cols_array();
