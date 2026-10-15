@@ -1538,6 +1538,8 @@ pub async fn start_export(
         include_lights: request.include_lights,
         include_nodraw: request.include_nodraw,
         include_shields: false,
+        include_vertex_colors: true,
+        include_damage: true,
         texture_mip: request.mip,
         lod_level: request.lod,
         threads: request.threads,

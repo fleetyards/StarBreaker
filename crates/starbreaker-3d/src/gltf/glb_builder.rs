@@ -96,6 +96,10 @@ pub(crate) struct GlbBuilder {
     geometry_cache: HashMap<SceneGeometryReuseKey, PackedGeometryInfo>,
     /// Maps lowercased node/entity name → glTF node index.
     pub node_name_to_idx: HashMap<String, u32>,
+    /// Emit `COLOR_0` on primitives. See `ExportOptions::include_vertex_colors`.
+    pub include_vertex_colors: bool,
+    /// Emit primitives of `Damage*` submaterials. See `ExportOptions::include_damage`.
+    pub include_damage: bool,
 }
 
 /// Texture dedup cache: maps a packed texture identity to its binary-buffer region.
@@ -163,6 +167,8 @@ impl GlbBuilder {
             scene_mesh_cache: HashMap::new(),
             geometry_cache: HashMap::new(),
             node_name_to_idx: HashMap::new(),
+            include_vertex_colors: true,
+            include_damage: true,
         }
     }
 
@@ -993,6 +999,7 @@ impl GlbBuilder {
             &mesh.submeshes,
             materials,
             palette,
+            dominant_paint_channel(&mesh.submeshes, materials),
             textures,
             &submaterial_texture_idx,
             &submaterial_normal_idx,
@@ -1011,6 +1018,10 @@ impl GlbBuilder {
         for (i, sub) in mesh.submeshes.iter().enumerate() {
             let mtl_sub = materials.and_then(|m| m.materials.get(sub.material_id as usize));
             if mtl_sub.is_some_and(|m| m.should_hide()) {
+                submesh_idx_accessors.push(None);
+                continue;
+            }
+            if !self.include_damage && mtl_sub.is_some_and(|m| is_damage_material(&m.name)) {
                 submesh_idx_accessors.push(None);
                 continue;
             }
@@ -1051,7 +1062,7 @@ impl GlbBuilder {
                     json::Index::new(normal_idx),
                 );
             }
-            if let Some(color_idx) = geometry.color_accessor_idx {
+            if let Some(color_idx) = geometry.color_accessor_idx.filter(|_| self.include_vertex_colors) {
                 attributes.insert(
                     Checked::Valid(json::mesh::Semantic::Colors(0)),
                     json::Index::new(color_idx),
@@ -1172,7 +1183,7 @@ impl GlbBuilder {
                             json::Index::new(n),
                         );
                     }
-                    if let Some(color) = packed.color_accessor_idx {
+                    if let Some(color) = packed.color_accessor_idx.filter(|_| self.include_vertex_colors) {
                         attributes.insert(
                             Checked::Valid(json::mesh::Semantic::Colors(0)),
                             json::Index::new(color),
@@ -2113,10 +2124,25 @@ fn material_uses_texture_transform(material: &json::Material) -> bool {
 }
 
 /// Build deduplicated glTF materials for a set of submeshes.
+/// The palette channel (1-3) most of a mesh's painted surface uses, by
+/// triangle count -- the paint its POM decals sit on. 0 when none is painted.
+fn dominant_paint_channel(submeshes: &[SubMesh], materials: Option<&crate::mtl::MtlFile>) -> u8 {
+    let mut area = [0u64; 4];
+    for sub in submeshes {
+        if let Some(m) = materials.and_then(|m| m.materials.get(sub.material_id as usize)) {
+            if !m.is_decal() && (1..=3).contains(&m.palette_tint) {
+                area[m.palette_tint as usize] += sub.num_indices as u64;
+            }
+        }
+    }
+    (1..=3u8).max_by_key(|&c| area[c as usize]).filter(|&c| area[c as usize] > 0).unwrap_or(0)
+}
+
 fn build_materials(
     submeshes: &[SubMesh],
     materials: Option<&crate::mtl::MtlFile>,
     palette: Option<&crate::mtl::TintPalette>,
+    host_channel: u8,
     textures: Option<&MaterialTextures>,
     submaterial_texture_idx: &[Option<u32>],
     submaterial_normal_idx: &[Option<u32>],
@@ -2133,6 +2159,7 @@ fn build_materials(
             sub,
             materials,
             palette,
+            host_channel,
             textures,
             submaterial_texture_idx,
             submaterial_normal_idx,
@@ -2153,11 +2180,28 @@ fn build_materials(
     }).collect()
 }
 
+/// Submaterials named `Damage*` (`Damage_Internal_Structure`, ...) only show
+/// through a damaged hull.
+fn is_damage_material(name: &str) -> bool {
+    name.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("damage"))
+}
+
+/// Whether a palette channel has no authored specular, so its diffuse alone is its colour.
+fn finish_less(p: &crate::mtl::TintPalette, channel: u8) -> bool {
+    match channel {
+        1 => p.finish.primary.specular.is_none(),
+        2 => p.finish.secondary.specular.is_none(),
+        3 => p.finish.tertiary.specular.is_none(),
+        _ => true,
+    }
+}
+
 /// Build a single glTF material from a submesh's material properties.
 fn build_material(
     sub: &SubMesh,
     materials: Option<&crate::mtl::MtlFile>,
     palette: Option<&crate::mtl::TintPalette>,
+    host_channel: u8,
     textures: Option<&MaterialTextures>,
     submaterial_texture_idx: &[Option<u32>],
     submaterial_normal_idx: &[Option<u32>],
@@ -2287,8 +2331,49 @@ fn build_material(
         None
     };
 
-    let (roughness, metallic) = mtl_sub.map(|m| (m.roughness(), m.metallic())).unwrap_or((0.5, 0.0));
+    let (mut roughness, mut metallic) = mtl_sub.map(|m| (m.roughness(), m.metallic())).unwrap_or((0.5, 0.0));
     let is_glass = mtl_sub.map(|m| m.is_glass()).unwrap_or(false);
+
+    // Paint takes its finish from the palette, authored as specular +
+    // glossiness. Without converting, a metallic paint (black diffuse, grey
+    // specular) is exported as black plastic.
+    //
+    // POM decals -- panel lines, vents, rivets -- carry a near-white atlas
+    // that the game shades with the paint underneath; on their own they print
+    // as white lines across the hull. They take the colour and finish of the
+    // mesh's dominant paint channel, as the Blender addon's host-tint does.
+    let mut base_color_factor = base_color_factor;
+    if let (Some(m), Some(p)) = (mtl_sub, palette) {
+        let is_pom_decal = m.is_decal() && m.decoded_string_gen_mask().has_parallax_occlusion_mapping;
+        let tint = if (1..=3).contains(&m.palette_tint) {
+            m.palette_tint
+        } else if is_pom_decal {
+            host_channel
+        } else {
+            0
+        };
+        if is_pom_decal && tint > 0 && finish_less(p, tint) {
+            let c = [p.primary, p.secondary, p.tertiary][tint as usize - 1];
+            base_color_factor = [c[0], c[1], c[2], base_color_factor[3]];
+        }
+        let channel = match tint {
+            1 => Some((p.primary, &p.finish.primary)),
+            2 => Some((p.secondary, &p.finish.secondary)),
+            3 => Some((p.tertiary, &p.finish.tertiary)),
+            _ => None,
+        };
+        if let Some((diffuse, finish)) = channel {
+            if let Some(specular) = finish.specular {
+                let (base, metal) = crate::mtl::specular_to_metal_rough(diffuse, specular);
+                base_color_factor = [base[0], base[1], base[2], base_color_factor[3]];
+                metallic = metal;
+            }
+            if let Some(glossiness) = finish.glossiness {
+                let g = if glossiness > 1.0 { glossiness / 255.0 } else { glossiness };
+                roughness = 1.0 - g.clamp(0.0, 1.0);
+            }
+        }
+    }
 
     // Per-pixel roughness creates visible specular noise in glTF PBR, especially on
     // dark surfaces viewed up close. Only enable with --experimental-textures.

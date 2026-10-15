@@ -114,6 +114,13 @@ pub struct ExportOptions {
     pub include_nodraw: bool,
     /// Include shield helper meshes and shield attachments.
     pub include_shields: bool,
+    /// Write vertex colours as `COLOR_0`. glTF multiplies `COLOR_0` into the
+    /// base colour, but Star Citizen's vertex colours are blend and wear
+    /// masks, not colour -- viewers then tint the hull blue and magenta.
+    pub include_vertex_colors: bool,
+    /// Keep `Damage*` submaterials: the internal structure the game shows
+    /// through a damaged hull, hidden behind the intact one.
+    pub include_damage: bool,
     /// LOD level (0 = highest detail, 1+ = lower).
     pub lod_level: u32,
     /// Texture mip level (0 = full resolution, 2 = 1/4 res, 4 = 1/16 res).
@@ -150,6 +157,8 @@ impl Default for ExportOptions {
             include_lights: true,
             include_nodraw: false,
             include_shields: false,
+            include_vertex_colors: true,
+            include_damage: true,
             lod_level: 1,
             texture_mip: 2,
             threads: 0,
@@ -387,6 +396,8 @@ pub fn socpaks_to_glb(
         &crate::gltf::GlbOptions {
             material_mode: opts.material_mode,
             preserve_textureless_decal_primitives: false,
+            include_vertex_colors: opts.include_vertex_colors,
+            include_damage: opts.include_damage,
             metadata: crate::gltf::GlbMetadata {
                 entity_name: None,
                 geometry_path: None,
