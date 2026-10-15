@@ -496,6 +496,7 @@ class BuildersMixin:
             self._patch_glass_template_lightpath(group)
         if group is not None and group_contract.name == "SB_MeshDecal_v1":
             self._patch_mesh_decal_template_emission(group)
+            self._patch_mesh_decal_template_metal(group)
         return group
 
     def _patch_glass_template_lightpath(self, group: bpy.types.ShaderNodeTree) -> None:
@@ -800,6 +801,130 @@ class BuildersMixin:
             links.new(alpha_mul.outputs[0], principled_alpha)
 
         group["starbreaker_mesh_decal_emission_patch_version"] = 4
+
+    #: Decoded F0 range over which a MeshDecal texel turns from dielectric to
+    #: metal. Dielectrics author F0 0.02-0.05 and metals >= 0.5; component POM
+    #: atlases sit up to ~0.45 (sRGB ~186) and must stay dielectric.
+    _MESH_DECAL_METAL_F0_RANGE = (0.40, 0.55)
+    _MESH_DECAL_METAL_PATCH_VERSION = 1
+
+    @classmethod
+    def _patch_mesh_decal_template_metal(cls, group: bpy.types.ShaderNodeTree) -> None:
+        """Render metal texels of a MeshDecal atlas as metal.
+
+        CryEngine encodes metal as near-black diffuse plus a bright sRGB spec
+        (F0) map. The template only fed the spec map into ``Specular IOR
+        Level`` (scaled by the host's dielectric specular), so the dark
+        polished-metal tiles of e.g. ``rsi_pom_B`` (diffuse ~0.03, F0 ~0.7)
+        rendered as matte black patches on the Constellation hull.
+
+        Texels whose decoded F0 passes ``_MESH_DECAL_METAL_F0_RANGE`` now get
+        that F0 as base colour, full metallic and the decal's own roughness
+        (``Decal Roughness``; -1 = unset, falls back to ``Host Roughness``).
+        """
+        if group.get("starbreaker_mesh_decal_metal_patch_version") == cls._MESH_DECAL_METAL_PATCH_VERSION:
+            return
+
+        nodes = group.nodes
+        links = group.links
+        group_input = next((node for node in nodes if node.bl_idname == "NodeGroupInput"), None)
+        principled = nodes.get("Principled BSDF")
+        host_tint = nodes.get("Apply Host Tint")
+        roughness_mix = nodes.get("Mix.001")
+        if group_input is None or principled is None or host_tint is None or roughness_mix is None:
+            return
+
+        if _output_socket(group_input, "Decal Roughness") is None:
+            try:
+                group.interface.new_socket(name="Decal Roughness", in_out="INPUT", socket_type="NodeSocketFloat")
+            except Exception:
+                return
+        for item in group.interface.items_tree:
+            if getattr(item, "item_type", "") == "SOCKET" and item.in_out == "INPUT" and item.name == "Decal Roughness":
+                item.default_value = -1.0
+                item.min_value = -1.0
+                item.max_value = 1.0
+
+        spec_socket = _output_socket(group_input, "TexSlot2_Specular")
+        decal_roughness_socket = _output_socket(group_input, "Decal Roughness")
+        host_roughness_socket = _output_socket(group_input, "Host Roughness")
+        base_color_input = _input_socket(principled, "Base Color")
+        metallic_input = _input_socket(principled, "Metallic")
+        roughness_input = _input_socket(principled, "Roughness")
+        if None in (
+            spec_socket,
+            decal_roughness_socket,
+            host_roughness_socket,
+            base_color_input,
+            metallic_input,
+            roughness_input,
+        ):
+            return
+
+        def _node(name: str, bl_idname: str, label: str, location: tuple[float, float]) -> bpy.types.Node:
+            node = nodes.get(name)
+            if node is not None and node.bl_idname != bl_idname:
+                nodes.remove(node)
+                node = None
+            if node is None:
+                node = nodes.new(bl_idname)
+                node.name = name
+            node.label = label
+            node.location = location
+            return node
+
+        def _link(from_socket: Any, to_socket: Any) -> None:
+            for link in list(to_socket.links):
+                links.remove(link)
+            links.new(from_socket, to_socket)
+
+        x, y = principled.location.x - 480, principled.location.y + 360
+
+        # The spec image is sampled as Non-Color; CryEngine stores it in sRGB.
+        f0 = _node("SB Decal Metal F0", "ShaderNodeGamma", "Spec sRGB -> F0", (x - 480, y))
+        f0.inputs["Gamma"].default_value = 2.2
+        _link(spec_socket, f0.inputs["Color"])
+
+        f0_luma = _node("SB Decal Metal F0 Luma", "ShaderNodeRGBToBW", "F0 Luma", (x - 300, y))
+        _link(f0.outputs[0], f0_luma.inputs[0])
+
+        mask = _node("SB Decal Metal Mask", "ShaderNodeMapRange", "Metal Mask", (x - 120, y))
+        mask.clamp = True
+        mask.inputs["From Min"].default_value = cls._MESH_DECAL_METAL_F0_RANGE[0]
+        mask.inputs["From Max"].default_value = cls._MESH_DECAL_METAL_F0_RANGE[1]
+        mask.inputs["To Min"].default_value = 0.0
+        mask.inputs["To Max"].default_value = 1.0
+        _link(f0_luma.outputs[0], mask.inputs["Value"])
+        mask_socket = mask.outputs["Result"]
+
+        base_mix = _node("SB Decal Metal Base Color", "ShaderNodeMix", "Metal Base Color", (x + 120, y))
+        base_mix.data_type = "RGBA"
+        base_mix.blend_type = "MIX"
+        _link(mask_socket, base_mix.inputs[0])
+        _link(host_tint.outputs[2], base_mix.inputs[6])
+        _link(f0.outputs[0], base_mix.inputs[7])
+        _link(base_mix.outputs[2], base_color_input)
+        _link(mask_socket, metallic_input)
+
+        unset = _node("SB Decal Roughness Unset", "ShaderNodeMath", "Decal Roughness Unset", (x - 120, y - 200))
+        unset.operation = "LESS_THAN"
+        unset.inputs[1].default_value = 0.0
+        _link(decal_roughness_socket, unset.inputs[0])
+
+        own_rough = _node("SB Decal Own Roughness", "ShaderNodeMix", "Decal Own Roughness", (x + 120, y - 200))
+        own_rough.data_type = "FLOAT"
+        _link(unset.outputs[0], own_rough.inputs[0])
+        _link(decal_roughness_socket, own_rough.inputs[2])
+        _link(host_roughness_socket, own_rough.inputs[3])
+
+        rough_mix = _node("SB Decal Metal Roughness", "ShaderNodeMix", "Metal Roughness", (x + 300, y - 200))
+        rough_mix.data_type = "FLOAT"
+        _link(mask_socket, rough_mix.inputs[0])
+        _link(roughness_mix.outputs[0], rough_mix.inputs[2])
+        _link(own_rough.outputs[0], rough_mix.inputs[3])
+        _link(rough_mix.outputs[0], roughness_input)
+
+        group["starbreaker_mesh_decal_metal_patch_version"] = cls._MESH_DECAL_METAL_PATCH_VERSION
 
     def _build_contract_group_material(
         self,
@@ -2678,6 +2803,9 @@ class BuildersMixin:
     #: saved by an older addon are rebuilt instead of reused.
     _ILLUM_POM_HOST_VARIANT_VERSION = 2
 
+    #: Bumped whenever the MeshDecal palette-channel variant wiring changes.
+    _MESH_DECAL_HOST_VARIANT_VERSION = 2
+
     def _ensure_illum_pom_host_rgb_variant(
         self,
         material: bpy.types.Material,
@@ -2768,12 +2896,18 @@ class BuildersMixin:
         base_material = self._decal_host_variant_base_material(material)
         clone_name = f"{self._decal_host_variant_base_name(material)}__host_{channel}"
         clone = bpy.data.materials.get(clone_name)
-        if clone is not None and clone.get("starbreaker_decal_host_channel") == channel:
+        if (
+            clone is not None
+            and clone.get("starbreaker_decal_host_channel") == channel
+            and clone.get("starbreaker_decal_host_variant_version") == self._MESH_DECAL_HOST_VARIANT_VERSION
+        ):
             return clone
+        # A clone saved by an older addon is rewired in place below.
         if clone is None:
             clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_channel"] = channel
+        clone["starbreaker_decal_host_variant_version"] = self._MESH_DECAL_HOST_VARIANT_VERSION
 
         nodes = clone.node_tree.nodes
         links = clone.node_tree.links
@@ -2833,6 +2967,21 @@ class BuildersMixin:
                 links.new(spec_source, spec_input)
 
         rough_input = decal_group_node.inputs.get("Host Roughness")
+        # Metal texels keep the decal's own (DDNA) roughness; see
+        # ``_patch_mesh_decal_template_metal``.
+        decal_rough_input = decal_group_node.inputs.get("Decal Roughness")
+        ddna_roughness = next(
+            (
+                _output_socket(n, "Roughness")
+                for n in nodes
+                if n.bl_idname == "ShaderNodeGroup"
+                and getattr(n, "node_tree", None) is not None
+                and n.node_tree.name.startswith("StarBreaker Runtime DDNA Roughness")
+            ),
+            None,
+        )
+        if decal_rough_input is not None and ddna_roughness is not None and not decal_rough_input.is_linked:
+            links.new(ddna_roughness, decal_rough_input)
         gloss_output_name = self._MESH_DECAL_HOST_CHANNEL_GLOSS.get(channel)
         if rough_input is not None and gloss_output_name is not None:
             gloss_source = _output_socket(palette_group_node, gloss_output_name)
