@@ -1163,7 +1163,10 @@ class BuildersMixin:
                 links.new(emission.outputs[0], add_shader.inputs[1])
                 surface_shader = add_shader.outputs[0]
 
-        links.new(surface_shader, output.inputs[0])
+        # Mesh decals float up to a few cm over the hull (the F8C's livery
+        # stripes sit 2 cm up); in game they are blended into the surface and
+        # cast nothing, so keep them out of shadow rays like the other builders.
+        self._wire_surface_shader_to_output(nodes, links, surface_shader, output, plan, submaterial)
 
         if submaterial.decoded_feature_flags.has_parallax_occlusion_mapping:
             # Phase 12 (POM plan, Phase 2 extension): contract-group

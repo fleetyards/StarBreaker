@@ -279,11 +279,20 @@ class DecalsMixin:
         if surface_shader is None:
             return
         if self._plan_casts_no_shadows(plan, submaterial):
+            # Overlays (mesh decals, Illum `%DECAL` sheets) only show on
+            # screen in game; POM panels keep receiving bounce light.
+            camera_only = getattr(plan, "template_key", "") == "decal_stencil" or (
+                submaterial is not None and submaterial.shader_family == "MeshDecal"
+            )
             wrapper = nodes.new("ShaderNodeGroup")
-            wrapper.node_tree = self._ensure_runtime_shadowless_wrapper_group()
+            wrapper.node_tree = (
+                self._ensure_runtime_camera_only_wrapper_group()
+                if camera_only
+                else self._ensure_runtime_shadowless_wrapper_group()
+            )
             _refresh_group_node_sockets(wrapper)
             wrapper.location = (output_node.location.x - 180, output_node.location.y - 140)
-            wrapper.label = "StarBreaker Shadowless"
+            wrapper.label = "StarBreaker Camera Only" if camera_only else "StarBreaker Shadowless"
             links.new(surface_shader, wrapper.inputs["Shader"])
             links.new(wrapper.outputs["Shader"], output_node.inputs[0])
         else:

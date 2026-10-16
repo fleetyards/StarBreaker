@@ -85,6 +85,7 @@ _RUNTIME_GROUP_PREFIXES: tuple[str, ...] = (
     "StarBreaker Runtime Specular Map Luma",
     "StarBreaker Runtime POM Detail",
     "StarBreaker Runtime Shadowless Wrapper",
+    "StarBreaker Runtime Camera Only Wrapper",
     "StarBreaker Wear Input",
     "StarBreaker Iridescence Input",
     # Phase 12 POM: appended copies of the production POM pipeline

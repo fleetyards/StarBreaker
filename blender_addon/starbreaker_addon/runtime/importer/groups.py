@@ -2367,6 +2367,55 @@ class GroupsMixin:
         group_tree["starbreaker_runtime_built_signature"] = "shadowless_wrapper_v1"
         return group_tree
 
+    def _ensure_runtime_camera_only_wrapper_group(self) -> bpy.types.ShaderNodeTree:
+        """Wrap a shader so only camera rays see it; every other ray passes.
+
+        In game a decal is blended into the surface it covers on screen and
+        takes no part in lighting. Authored up to a few cm over the hull
+        (the F8C's hazard stripes sit 3 cm up), a decal that only stops
+        shadow rays still blocks the bounce light under it and prints a
+        soft dark copy of itself on the hull.
+        """
+        self._invalidate_runtime_group_if_unexpected(
+            "StarBreaker Runtime Camera Only Wrapper",
+            "camera_only_wrapper_v1",
+            {
+                "NodeGroupInput": 1,
+                "NodeGroupOutput": 1,
+                "ShaderNodeLightPath": 1,
+                "ShaderNodeBsdfTransparent": 1,
+                "ShaderNodeMixShader": 1,
+            },
+        )
+        group_tree, group_input, group_output = self._begin_runtime_shared_group(
+            "StarBreaker Runtime Camera Only Wrapper",
+            signature="camera_only_wrapper_v1",
+            inputs=[
+                ("Shader", "NodeSocketShader"),
+            ],
+            outputs=[
+                ("Shader", "NodeSocketShader"),
+            ],
+        )
+        if group_tree.get("starbreaker_runtime_built_signature") == "camera_only_wrapper_v1":
+            return group_tree
+        nodes = group_tree.nodes
+        links = group_tree.links
+
+        light_path = nodes.new("ShaderNodeLightPath")
+        light_path.location = (-200, -200)
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        transparent.location = (0, -200)
+        mix_shader = nodes.new("ShaderNodeMixShader")
+        mix_shader.location = (200, 0)
+        links.new(_output_socket(light_path, "Is Camera Ray"), mix_shader.inputs[0])
+        links.new(transparent.outputs[0], mix_shader.inputs[1])
+        links.new(_output_socket(group_input, "Shader"), mix_shader.inputs[2])
+        links.new(mix_shader.outputs[0], group_output.inputs["Shader"])
+
+        group_tree["starbreaker_runtime_built_signature"] = "camera_only_wrapper_v1"
+        return group_tree
+
     def _ensure_runtime_illum_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime Illum",

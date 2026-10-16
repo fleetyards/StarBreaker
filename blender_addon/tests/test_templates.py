@@ -79,6 +79,26 @@ def synthetic_submaterial(shader_family: str, *, tokens: list[str] | None = None
 
 
 class TemplateTests(unittest.TestCase):
+    def test_untextured_placeholder_mesh_decal_is_nodraw(self) -> None:
+        # The F8C's placeholder_livery_999th: no textures, waits for a paint.
+        placeholder = SubmaterialRecord.from_value(
+            {
+                "submaterial_name": "placeholder_livery_999th",
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+            }
+        )
+        self.assertEqual(template_plan_for_submaterial(placeholder).template_key, "nodraw")
+
+        untextured = SubmaterialRecord.from_value(
+            {
+                "submaterial_name": "stripes",
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+            }
+        )
+        self.assertEqual(template_plan_for_submaterial(untextured).template_key, "decal_stencil")
+
     @unittest.skipUnless(
         ARGO_EXTERIOR.is_file() and ARGO_INTERIOR.is_file() and COMPONENT_MASTER.is_file(),
         "ARGO MOLE fixtures not present; skipping fixture-dependent template test",

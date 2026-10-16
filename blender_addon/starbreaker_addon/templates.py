@@ -32,10 +32,21 @@ def active_submaterials(submaterials: list[SubmaterialRecord]) -> list[Submateri
 
 
 def _is_empty_livery_decal(submaterial: SubmaterialRecord) -> bool:
-    if (submaterial.submaterial_name or "").lower() != "livery_decal":
+    """A livery slot with nothing to draw until a paint fills it.
+
+    Besides `livery_decal`, an untextured placeholder mesh decal: the F8C's
+    `placeholder_livery_999th` covers the same stripes as its `livery` decal,
+    with nothing to draw until a paint supplies its livery.
+    """
+    name = (submaterial.submaterial_name or "").lower()
+    is_livery_slot = name == "livery_decal"
+    if not is_livery_slot and not (submaterial.shader_family == "MeshDecal" and "placeholder" in name):
         return False
+    # Only the livery slot counts a missing base colour as empty: other
+    # livery decals (`livery`) draw from the palette's decal texture.
     if (
-        submaterial.activation_state != "active"
+        is_livery_slot
+        and submaterial.activation_state != "active"
         and submaterial.activation_reason == "missing_base_color_texture"
     ):
         return True
