@@ -5,7 +5,7 @@ use crate::types::{Record, StructId};
 use std::collections::{HashMap, HashSet};
 
 /// A node in the resolved loadout tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LoadoutNode {
     /// The entity's DataCore record.
     pub record: Record,
@@ -134,39 +134,44 @@ impl<'a> EntityIndex<'a> {
     /// Query SubGeometry variants from an entity's SGeometryResourceParams.
     /// Returns tagged geometry variants (e.g., "right" -> Right.cga, "left" -> Left.cga).
     pub fn query_sub_geometry(&self, record: &Record) -> Vec<SubGeometryVariant> {
-        // Query the full SGeometryResourceParams component, then walk to SubGeometry.
-        // Querying just ".Geometry" may truncate the SubGeometry array.
-        let compiled = match self.db.compile_path::<Value>(
-            record.struct_id(),
-            "Components[SGeometryResourceParams]",
-        ) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
+        query_sub_geometry(self.db, record)
+    }
+}
 
-        let components = match self.db.query::<Value>(&compiled, record) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
+/// SubGeometry variants of an entity's SGeometryResourceParams.
+fn query_sub_geometry(db: &Database, record: &Record) -> Vec<SubGeometryVariant> {
+    // Query the full SGeometryResourceParams component, then walk to SubGeometry.
+    // Querying just ".Geometry" may truncate the SubGeometry array.
+    let compiled = match db.compile_path::<Value>(
+        record.struct_id(),
+        "Components[SGeometryResourceParams]",
+    ) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
 
-        let mut variants = Vec::new();
-        for component in &components {
-            let geom_node = match get_object_field(component, "Geometry") {
-                Some(g) => g,
-                None => {
-                    log::debug!("    no Geometry field in component");
-                    continue;
-                }
-            };
-            let sub_arr = get_array_field(geom_node, "SubGeometry");
-            if let Some(sub_geom_arr) = sub_arr {
-                for sub in sub_geom_arr {
-                    collect_sub_geometry_variants(sub, &[], &mut variants);
-                }
+    let components = match db.query::<Value>(&compiled, record) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut variants = Vec::new();
+    for component in &components {
+        let geom_node = match get_object_field(component, "Geometry") {
+            Some(g) => g,
+            None => {
+                log::debug!("    no Geometry field in component");
+                continue;
+            }
+        };
+        let sub_arr = get_array_field(geom_node, "SubGeometry");
+        if let Some(sub_geom_arr) = sub_arr {
+            for sub in sub_geom_arr {
+                collect_sub_geometry_variants(sub, &[], &mut variants);
             }
         }
-        variants
     }
+    variants
 }
 
 /// Extract a string field from a Value::Object.
@@ -650,6 +655,50 @@ fn best_sub_geometry_variant_match<'a>(
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
         .map(|(_, _, variant)| variant)
+}
+
+/// Re-pick SubGeometry variants of a ship's direct children by the flags of
+/// the item ports its vehicle implementation XML defines.
+///
+/// A ship's own ports live in that XML, not in DataCore, and the XML's
+/// `flags` are what the game matches variant tags against. The F8C mounts
+/// one `ANVL_Lightning_F8_Thruster_Main` item on three ports; the middle one
+/// is `hardpoint_engine_mid` with `flags="main rear center uneditable"`, and
+/// only the flags name the `center` variant. Port tags still win when they
+/// select a variant themselves.
+pub fn select_variants_by_port_flags(
+    db: &Database,
+    children: &mut [LoadoutNode],
+    flags_by_port: &HashMap<String, String>,
+) {
+    for child in children.iter_mut() {
+        let Some(flags) = flags_by_port.get(&child.item_port_name.to_ascii_lowercase()) else {
+            continue;
+        };
+        if child.port_flags.is_empty() {
+            child.port_flags = flags.clone();
+        }
+        let variants = query_sub_geometry(db, &child.record);
+        if variants.is_empty() || !variants_belong_to_item(child.geometry_path.as_deref(), &variants) {
+            continue;
+        }
+        if !child.port_tags.is_empty() && best_sub_geometry_variant_match(&variants, &child.port_tags).is_some() {
+            continue;
+        }
+        let Some(m) = best_sub_geometry_variant_match(&variants, flags) else {
+            continue;
+        };
+        if child.geometry_path.as_deref() != Some(m.geometry_path.as_str()) {
+            log::info!(
+                "  SubGeometry: {} on {} tag='{}' (port flags '{}') -> {}",
+                child.entity_name, child.item_port_name, m.tag, flags, m.geometry_path
+            );
+            child.geometry_path = Some(m.geometry_path.clone());
+            if !m.material_path.is_empty() {
+                child.material_path = Some(m.material_path.clone());
+            }
+        }
+    }
 }
 
 /// Resolve the full loadout tree for an entity, recursively walking

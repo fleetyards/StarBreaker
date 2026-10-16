@@ -82,16 +82,11 @@ pub(crate) fn query_landing_gear(db: &Database, record: &Record) -> Vec<(String,
 /// Resolve and parse the .mtl material file for a mesh.
 // ── Vehicle XML invisible-port extraction ────────────────────────────────────
 
-/// Load the vehicle implementation XML(s) and return the set of port names
-/// whose `<ItemPort>` has `flags` containing "invisible".
-///
-/// Returns an empty set for non-vehicle entities (no `VehicleComponentParams`).
-pub fn load_invisible_ports(
-    db: &Database,
-    p4k: &MappedP4k,
-    record: &Record,
-) -> std::collections::HashSet<String> {
-    let mut invisible = std::collections::HashSet::new();
+/// The vehicle implementation XML and its modification XML, if any, as raw
+/// bytes in that order (the modification overrides the base). Empty for
+/// non-vehicle entities (no `VehicleComponentParams`).
+fn vehicle_xml_bytes(db: &Database, p4k: &MappedP4k, record: &Record) -> Vec<(Vec<u8>, bool)> {
+    let mut out = Vec::new();
 
     // Query vehicleDefinition and modification from DataCore.
     let veh_def = db
@@ -104,7 +99,7 @@ pub fn load_invisible_ports(
 
     let veh_def = match veh_def {
         Some(ref s) if !s.is_empty() => s,
-        _ => return invisible,
+        _ => return out,
     };
 
     let modification = db
@@ -122,9 +117,7 @@ pub fn load_invisible_ports(
         .entry_case_insensitive(&base_p4k)
         .and_then(|e| p4k.read(e).ok())
     {
-        if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
-            collect_invisible_ports_from_xml(&xml, xml.root(), &mut invisible);
-        }
+        out.push((data, false));
     }
 
     // Load modification XML if present.
@@ -139,10 +132,32 @@ pub fn load_invisible_ports(
                 .entry_case_insensitive(&mod_p4k)
                 .and_then(|e| p4k.read(e).ok())
             {
-                if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
-                    // Modification overrides: re-collect, allowing override of base flags.
-                    collect_invisible_ports_from_xml_override(&xml, xml.root(), &mut invisible);
-                }
+                out.push((data, true));
+            }
+        }
+    }
+
+    out
+}
+
+/// Load the vehicle implementation XML(s) and return the set of port names
+/// whose `<ItemPort>` has `flags` containing "invisible".
+///
+/// Returns an empty set for non-vehicle entities (no `VehicleComponentParams`).
+pub fn load_invisible_ports(
+    db: &Database,
+    p4k: &MappedP4k,
+    record: &Record,
+) -> std::collections::HashSet<String> {
+    let mut invisible = std::collections::HashSet::new();
+
+    for (data, is_modification) in vehicle_xml_bytes(db, p4k, record) {
+        if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
+            if is_modification {
+                // Modification overrides: re-collect, allowing override of base flags.
+                collect_invisible_ports_from_xml_override(&xml, xml.root(), &mut invisible);
+            } else {
+                collect_invisible_ports_from_xml(&xml, xml.root(), &mut invisible);
             }
         }
     }
@@ -155,6 +170,53 @@ pub fn load_invisible_ports(
     }
 
     invisible
+}
+
+/// The `flags` of every item port the vehicle XML(s) define, keyed by
+/// lowercase port name; a modification's port replaces the base's.
+///
+/// Ship-level ports exist only here, and their flags (`main rear center`)
+/// select SubGeometry variants: see
+/// `starbreaker_datacore::loadout::select_variants_by_port_flags`.
+pub fn load_vehicle_port_flags(
+    db: &Database,
+    p4k: &MappedP4k,
+    record: &Record,
+) -> std::collections::HashMap<String, String> {
+    fn walk(
+        xml: &starbreaker_cryxml::CryXml,
+        node: &starbreaker_cryxml::CryXmlNode,
+        flags: &mut std::collections::HashMap<String, String>,
+    ) {
+        if xml.node_tag(node) == "Part" {
+            let part_name = xml
+                .node_attributes(node)
+                .find(|(k, _)| *k == "name")
+                .map(|(_, v)| v)
+                .unwrap_or("");
+            for child in xml.node_children(node) {
+                if xml.node_tag(child) == "ItemPort" && !part_name.is_empty() {
+                    let port_flags = xml
+                        .node_attributes(child)
+                        .find(|(k, _)| *k == "flags")
+                        .map(|(_, v)| v)
+                        .unwrap_or("");
+                    flags.insert(part_name.to_ascii_lowercase(), port_flags.to_string());
+                }
+            }
+        }
+        for child in xml.node_children(node) {
+            walk(xml, child, flags);
+        }
+    }
+
+    let mut flags = std::collections::HashMap::new();
+    for (data, _) in vehicle_xml_bytes(db, p4k, record) {
+        if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
+            walk(&xml, xml.root(), &mut flags);
+        }
+    }
+    flags
 }
 
 /// Walk a vehicle XML recursively collecting port names with `invisible` in flags.

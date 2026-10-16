@@ -134,7 +134,13 @@ pub fn resolve_loadout_meshes(
     // Load invisible port flags from vehicle XML (empty for non-vehicles).
     let invisible_ports = load_invisible_ports(db, p4k, record);
 
-    let mut children = resolve_children(db, p4k, &tree.root.children, opts, &invisible_ports);
+    // The ship's own ports are in its vehicle XML; their flags pick the
+    // SubGeometry variant of the item mounted on them.
+    let port_flags = super::vehicle::load_vehicle_port_flags(db, p4k, record);
+    let mut root_children = tree.root.children.clone();
+    starbreaker_datacore::loadout::select_variants_by_port_flags(db, &mut root_children, &port_flags);
+
+    let mut children = resolve_children(db, p4k, &root_children, opts, &invisible_ports);
 
     // Load Tread/Wheel parts from vehicle definition XML (ground vehicles).
     // These are geometry parts not represented in the DataCore loadout tree.
