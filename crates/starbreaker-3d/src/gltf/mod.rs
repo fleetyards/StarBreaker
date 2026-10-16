@@ -56,6 +56,10 @@ pub struct GlbLoaders<'a> {
 pub struct GlbOptions {
     pub material_mode: crate::pipeline::MaterialMode,
     pub preserve_textureless_decal_primitives: bool,
+    /// See `ExportOptions::include_vertex_colors`.
+    pub include_vertex_colors: bool,
+    /// See `ExportOptions::include_damage`.
+    pub include_damage: bool,
     pub metadata: GlbMetadata,
     pub fallback_palette: Option<crate::mtl::TintPalette>,
 }
@@ -168,6 +172,8 @@ pub fn write_glb_with_progress(
     progress: Option<&Progress>,
 ) -> Result<Vec<u8>, Error> {
     let mut builder = GlbBuilder::new();
+    builder.include_vertex_colors = opts.include_vertex_colors;
+    builder.include_damage = opts.include_damage;
 
     log::info!("[mem-phase] start write_glb");
     report_progress(progress, 0.05, "Packing root mesh");
@@ -353,6 +359,8 @@ mod tests {
         GlbOptions {
             material_mode: crate::pipeline::MaterialMode::None,
             preserve_textureless_decal_primitives: false,
+            include_vertex_colors: true,
+            include_damage: true,
             metadata: GlbMetadata {
                 entity_name: None,
                 geometry_path: None,

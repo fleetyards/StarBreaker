@@ -178,6 +178,30 @@ fn caf_anchored_remap(
     let mut matched = vec![false; db.clips.len()];
     let mut named_clips: Vec<AnimationClip> = Vec::new();
 
+    // Blocks whose DBA name is the CAF path of some event in this chrparams.
+    // When an event has a valid path match, the semantic step below must not
+    // take one of these from under the event it is named for. On the
+    // Constellation Mk V, `VTOL_Deploy` (processed first, the map is sorted)
+    // otherwise lost its 36-channel deploy block to the 42-channel retract
+    // block -- same panels, more channels, a higher summed score -- and
+    // `VTOL_Retract` was left the deploy block: the two clips came out swapped.
+    let event_path_blocks: HashSet<usize> = chrparams
+        .animations
+        .values()
+        .flat_map(|caf| {
+            let resolved = chrparams.resolved_caf_path(caf).to_ascii_lowercase();
+            let file = resolved.rsplit_once('/').map(|(_, t)| t.to_string()).unwrap_or_else(|| resolved.clone());
+            [resolved, file]
+        })
+        .filter_map(|key| name_map.get(&key))
+        .flatten()
+        .copied()
+        .collect();
+    // Which CAF claimed a block by path, so a second event naming the same
+    // CAF -- the Mk V lists `vtol_panel_deploy.caf` as both `vtol` and
+    // `VTOL_Deploy` -- shares the block instead of hunting for another.
+    let mut claimed_by_path: HashMap<usize, String> = HashMap::new();
+
     for (event_name, caf_path) in &chrparams.animations {
         let resolved_caf = chrparams.resolved_caf_path(caf_path);
         let resolved_lower = resolved_caf.to_ascii_lowercase();
@@ -197,6 +221,7 @@ fn caf_anchored_remap(
 
         let mut chosen_idx: Option<usize> = None;
         let mut path_idx_hint: Option<usize> = None;
+        let mut shared = false;
 
         // Step 1: path-based lookup.
         let mut lookup_keys = vec![resolved_lower.clone()];
@@ -223,6 +248,13 @@ fn caf_anchored_remap(
                             "[anim] path-matched block {path_idx} for '{event_name}' has bones outside skeleton — using semantic/bone-subset fallback"
                         );
                     }
+                } else if let Some(&idx) = path_indices
+                    .iter()
+                    .find(|idx| claimed_by_path.get(*idx).is_some_and(|caf| *caf == resolved_lower))
+                {
+                    chosen_idx = Some(idx);
+                    shared = true;
+                    break;
                 }
             }
         }
@@ -231,9 +263,10 @@ fn caf_anchored_remap(
         // root body CHRs where many clips share controller counts/start quats and
         // path-index alignment can be wrong when DBA metadata order differs from
         // block order.
-        if can_validate && !skeleton_bone_name_by_hash.is_empty() {
+        if !shared && can_validate && !skeleton_bone_name_by_hash.is_empty() {
             let best_semantic = (0..db.clips.len())
                 .filter(|&i| !matched[i])
+                .filter(|&i| path_idx_hint.is_none() || Some(i) == path_idx_hint || !event_path_blocks.contains(&i))
                 .filter(|&i| {
                     !db.clips[i].channels.is_empty()
                         && db.clips[i]
@@ -301,6 +334,9 @@ fn caf_anchored_remap(
 
         if let Some(idx) = chosen_idx {
             matched[idx] = true;
+            if chosen_idx == path_idx_hint {
+                claimed_by_path.insert(idx, resolved_lower.clone());
+            }
             named_clips.push(AnimationClip {
                 name: event_name.clone(),
                 fps: db.clips[idx].fps,

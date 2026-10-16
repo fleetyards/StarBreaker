@@ -782,6 +782,12 @@ def apply_paint_to_package_root(context: bpy.types.Context, package_root: bpy.ty
     base_exterior = _exterior_material_sidecars(package)
     check_sidecars = effective_exterior or base_exterior
 
+    # Only the hull's own material file has paint variants. The exterior livery
+    # group can also hold other files that merely share the palette -- the
+    # Constellation Mk V's group includes its docked Skylark -- and pointing
+    # those at the hull's variant file rebuilds them from the wrong materials.
+    hull_sidecar = package.scene.root_entity.material_sidecar
+
     importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
@@ -792,7 +798,11 @@ def apply_paint_to_package_root(context: bpy.types.Context, package_root: bpy.ty
             if check_sidecars is not None and (obj_sidecar is None or obj_sidecar not in check_sidecars):
                 continue
             instance = _scene_instance_from_object(obj)
-            restored_sidecar = _restore_paint_object_sidecar(instance, target_sidecar)
+            original_sidecar = getattr(instance, "material_sidecar", None) or obj_sidecar
+            if hull_sidecar and original_sidecar != hull_sidecar:
+                restored_sidecar = original_sidecar
+            else:
+                restored_sidecar = _restore_paint_object_sidecar(instance, target_sidecar)
             if restored_sidecar is None:
                 continue
             # Point the object at the target sidecar (or restore its original

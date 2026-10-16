@@ -95,6 +95,8 @@ pub fn skin_to_glb(data: &[u8], metadata: Option<&[u8]>) -> Result<Vec<u8>, Erro
         &gltf::GlbOptions {
             material_mode: pipeline::MaterialMode::None,
             preserve_textureless_decal_primitives: false,
+            include_vertex_colors: true,
+            include_damage: true,
             metadata: gltf::GlbMetadata {
                 entity_name: None,
                 geometry_path: None,

@@ -651,6 +651,43 @@ pub fn layer_metallic(
     0.0
 }
 
+/// Metal/roughness base colour and metallic for a specular-workflow colour pair.
+///
+/// Tint palettes author paint as diffuse + specular. A glTF viewer has no
+/// specular input, so a palette entry like the Constellation Mk V's primary
+/// (black diffuse, 0.178 specular -- a dark metallic grey in game) comes out
+/// as black plastic when only the diffuse is carried over. This is the
+/// conversion from Khronos' KHR_materials_pbrSpecularGlossiness sample code
+/// (`solveMetallic`), as gltf-transform's `metalRough` uses it.
+pub fn specular_to_metal_rough(diffuse: [f32; 3], specular: [f32; 3]) -> ([f32; 3], f32) {
+    const DIELECTRIC: f32 = 0.04;
+    const EPSILON: f32 = 1e-6;
+    let perceived = |c: [f32; 3]| (0.299 * c[0] * c[0] + 0.587 * c[1] * c[1] + 0.114 * c[2] * c[2]).sqrt();
+    let max_spec = specular.into_iter().fold(0.0f32, f32::max);
+    let one_minus_spec = 1.0 - max_spec;
+    let d = perceived(diffuse);
+    let s = perceived(specular);
+
+    let metallic = if s < DIELECTRIC {
+        0.0
+    } else {
+        let a = DIELECTRIC;
+        let b = d * one_minus_spec / (1.0 - a) + s - 2.0 * a;
+        let c = a - s;
+        let disc = (b * b - 4.0 * a * c).max(0.0);
+        ((-b + disc.sqrt()) / (2.0 * a)).clamp(0.0, 1.0)
+    };
+
+    let mut base = [0.0f32; 3];
+    for i in 0..3 {
+        let from_diffuse = diffuse[i] * (one_minus_spec / (1.0 - DIELECTRIC) / (1.0 - metallic).max(EPSILON));
+        let from_specular = (specular[i] - DIELECTRIC * (1.0 - metallic)) / metallic.max(EPSILON);
+        let t = metallic * metallic;
+        base[i] = (from_diffuse + (from_specular - from_diffuse) * t).clamp(0.0, 1.0);
+    }
+    (base, metallic)
+}
+
 pub fn resolve_layer_submaterial<'a>(
     materials: &'a MtlFile,
     selector: &str,
@@ -1332,6 +1369,21 @@ mod tests {
             layer_metallic([0.004, 0.004, 0.004], [0.53, 0.49, 0.44], None),
             1.0
         );
+    }
+
+    #[test]
+    fn specular_to_metal_rough_turns_black_diffuse_grey_spec_into_grey_metal() {
+        // Constellation Mk V Centaurus primary paint.
+        let (base, metallic) = specular_to_metal_rough([0.0; 3], [0.1779; 3]);
+        assert!((metallic - 1.0).abs() < 1e-3, "metallic {metallic}");
+        assert!((base[0] - 0.1779).abs() < 1e-3, "base {base:?}");
+    }
+
+    #[test]
+    fn specular_to_metal_rough_keeps_plain_paint_dielectric() {
+        let (base, metallic) = specular_to_metal_rough([0.5, 0.2, 0.1], [0.04; 3]);
+        assert!(metallic < 1e-3, "metallic {metallic}");
+        assert!((base[0] - 0.5).abs() < 0.01 && (base[2] - 0.1).abs() < 0.01, "base {base:?}");
     }
 
     #[test]

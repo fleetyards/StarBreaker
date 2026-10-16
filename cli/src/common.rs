@@ -67,6 +67,17 @@ pub struct ExportOpts {
     /// Include shield helper meshes and shield attachments in exports
     #[arg(long)]
     pub include_shields: bool,
+    /// Leave vertex colours out of a bundled GLB. glTF viewers multiply
+    /// `COLOR_0` into the base colour, and the game's are blend masks
+    #[arg(long)]
+    pub no_vertex_colors: bool,
+    /// Leave out `Damage*` submaterials, the structure behind a damaged hull
+    #[arg(long)]
+    pub no_damage: bool,
+    /// Keep the bind pose in a bundled GLB instead of baking the landing
+    /// gear's `landing_gear_extend` pose
+    #[arg(long)]
+    pub no_default_pose: bool,
     /// Subdirectory under `Packages/` for decomposed exports (e.g. `ship`),
     /// matching the object-type folder the desktop app writes into
     #[arg(long)]
@@ -105,11 +116,14 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             include_lights: !opts.no_lights,
             include_nodraw: opts.include_nodraw,
             include_shields: opts.include_shields,
+            include_vertex_colors: !opts.no_vertex_colors,
+            include_damage: !opts.no_damage,
             texture_mip: opts.mip,
             lod_level: opts.lod,
             threads: opts.threads,
             include_animations: matches!(kind, starbreaker_3d::ExportKind::Decomposed),
-            apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed),
+            apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed)
+                && !opts.no_default_pose,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: match kind {
                 starbreaker_3d::ExportKind::Decomposed => opts.package_subdir.clone(),

@@ -461,6 +461,8 @@ pub fn assemble_glb_with_loadout_with_progress(
         &crate::gltf::GlbOptions {
             material_mode: opts.material_mode,
             preserve_textureless_decal_primitives: false,
+            include_vertex_colors: opts.include_vertex_colors,
+            include_damage: opts.include_damage,
             metadata: crate::gltf::GlbMetadata {
                 entity_name: Some(resolved.entity_name.clone()),
                 geometry_path: Some(geometry_path.clone()),
