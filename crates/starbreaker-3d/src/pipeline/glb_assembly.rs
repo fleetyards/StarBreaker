@@ -6,7 +6,7 @@
 //! (or decomposed writer) with all assembled inputs. Also contains
 //! `assemble_glb_with_loadout` (thin wrapper) and `path_is_shield_related`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use starbreaker_common::progress::{report as report_progress, Progress};
@@ -125,13 +125,45 @@ pub fn assemble_glb_with_loadout_with_progress(
         material_mode: child_material_mode,
         ..payload_opts.clone()
     };
-    let gear_parts = query_landing_gear(db, record);
+    let mut gear_owners = vec![(*record, resolved.entity_name.clone())];
+    collect_landing_gear_owners(&resolved.children, &mut gear_owners);
+    let gear_parts: Vec<_> = gear_owners
+        .into_iter()
+        .flat_map(|(gear_record, parent_entity_name)| {
+            query_landing_gear(db, &gear_record)
+                .into_iter()
+                .map(move |(gear_path, bone_name)| {
+                    (gear_path, bone_name, parent_entity_name.clone())
+                })
+        })
+        .collect();
+    let nested_vehicle_names: HashSet<String> = gear_parts
+        .iter()
+        .map(|(_, _, owner)| owner)
+        .filter(|owner| **owner != resolved.entity_name)
+        .cloned()
+        .collect();
     let mut child_payloads: Vec<EntityPayload> = Vec::new();
     report_progress(progress, FLATTEN_STAGE_START, "Flattening attachments");
     let phase_start = Instant::now();
     if opts.include_attachments {
+        // The Blender importer resolves parent entities in child-list order.
+        // Emit loadout entities first so a nested gear payload can attach to its
+        // command-module hardpoints instead of falling back to the ship root.
+
+        flatten_resolved_tree(
+            &resolved.children,
+            &resolved.entity_name,
+            None,
+            db,
+            p4k,
+            &child_opts,
+            child_payload_material_mode,
+            existing_asset_paths,
+            &mut child_payloads,
+        );
         let mut gear_cache: HashMap<String, LandingGearAsset> = HashMap::new();
-        for (gear_path, bone_name) in &gear_parts {
+        for (gear_path, bone_name, parent_entity_name) in &gear_parts {
             let asset = if let Some(cached) = gear_cache.get(gear_path.as_str()) {
                 log::info!("  mesh cache hit for landing gear '{gear_path}'");
                 Some(cached.clone())
@@ -199,12 +231,13 @@ pub fn assemble_glb_with_loadout_with_progress(
                     entity_category: None,
                     attach_def_type: None,
                     parent_node_name: bone_name.clone(),
-                    parent_entity_name: resolved.entity_name.clone(),
+                    parent_entity_name: parent_entity_name.clone(),
                     no_rotation: false,
                     offset_position: [0.0; 3],
                     offset_rotation: [0.0; 3],
                     detach_direction: [0.0; 3],
                     port_flags: String::new(),
+                    docking_collar_port: None,
                 });
                 log::info!("  landing gear '{gear_path}' → '{bone_name}', {verts} verts");
             }
@@ -213,17 +246,6 @@ pub fn assemble_glb_with_loadout_with_progress(
             "[gear] {} hardpoints, {} unique CGFs cached",
             gear_parts.len(),
             gear_cache.len(),
-        );
-        flatten_resolved_tree(
-            &resolved.children,
-            &resolved.entity_name,
-            None,
-            db,
-            p4k,
-            &child_opts,
-            child_payload_material_mode,
-            existing_asset_paths,
-            &mut child_payloads,
         );
     }
     log::info!("[timing] load_landing_gear + flatten_tree: {:.2}s", phase_start.elapsed().as_secs_f32());
@@ -390,6 +412,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             root_skeleton_source_path,
             root_animation_controller,
             children: child_payloads,
+            nested_vehicle_names,
             interiors: loaded_interiors,
             paint_variants,
         };

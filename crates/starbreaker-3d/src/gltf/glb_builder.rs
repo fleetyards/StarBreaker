@@ -574,6 +574,9 @@ impl GlbBuilder {
         let has_mesh = !child.mesh.positions.is_empty();
 
         // Pack mesh data (skip for NMC-only entities with no geometry).
+        // `pack_mesh` may serve an existing mesh from the scene cache instead of
+        // appending one; `build_nmc_hierarchy` must only pop what was appended.
+        let meshes_before_pack = self.meshes_json.len();
         let child_packed = if has_mesh {
             let resolved_palette = child.palette.as_ref().or(fallback_palette);
             let loaded_textures = if child.textures.is_some() {
@@ -623,6 +626,7 @@ impl GlbBuilder {
                     child_nmc,
                     &child.mesh.submeshes,
                     has_mesh,
+                    self.meshes_json.len() > meshes_before_pack,
                 );
 
                 // Log NMC node debug info
@@ -1106,11 +1110,19 @@ impl GlbBuilder {
         nmc: &NodeMeshCombo,
         submeshes: &[crate::types::SubMesh],
         has_mesh: bool,
+        flat_mesh_is_fresh: bool,
     ) -> Vec<u32> {
         use std::collections::BTreeMap;
 
         // Remove the flat mesh — we'll replace with per-NMC-node meshes.
-        if has_mesh {
+        //
+        // Only when `pack_mesh` actually appended one. On a scene-mesh cache
+        // hit it returns an existing `PackedMeshInfo` without pushing, so
+        // popping would delete a mesh belonging to the earlier instance and
+        // shift every later mesh index down by one. Two attachments sharing
+        // one geometry (the ATLS's six identical thrusters, both IKTI arm
+        // weapons, repeated ship components) then render each other's meshes.
+        if has_mesh && flat_mesh_is_fresh {
             self.meshes_json.pop();
         }
 
@@ -2788,3 +2800,85 @@ fn pack_texture_deduped(
     Some(region)
 }
 
+
+#[cfg(test)]
+mod pop_guard_tests {
+    use super::*;
+
+    fn empty_mesh_json() -> json::Mesh {
+        json::Mesh {
+            extensions: Default::default(),
+            extras: Default::default(),
+            name: None,
+            primitives: Vec::new(),
+            weights: None,
+        }
+    }
+
+    fn dummy_packed() -> PackedMeshInfo {
+        PackedMeshInfo {
+            mesh_idx: 0,
+            pos_accessor_idx: 0,
+            uv_accessor_idx: None,
+            secondary_uv_accessor_idx: None,
+            normal_accessor_idx: None,
+            color_accessor_idx: None,
+            tangent_accessor_idx: None,
+            submesh_mat_indices: Vec::new(),
+            submesh_idx_accessors: Vec::new(),
+        }
+    }
+
+    fn one_node_nmc() -> NodeMeshCombo {
+        NodeMeshCombo {
+            nodes: vec![crate::nmc::NmcNode {
+                name: "root".to_string(),
+                parent_index: None,
+                world_to_bone: [[0.0; 4]; 3],
+                bone_to_world: [[0.0; 4]; 3],
+                scale: [1.0; 3],
+                geometry_type: 0,
+                properties: Default::default(),
+            }],
+            material_indices: vec![0],
+        }
+    }
+
+    /// A second attachment sharing one geometry gets its `PackedMeshInfo` from
+    /// the scene mesh cache, so nothing was appended and nothing may be popped.
+    /// Popping there deletes the previous instance's mesh and shifts every
+    /// later mesh index down by one, leaving nodes bound to each other's
+    /// geometry (both ARGO ATLS IKTI arm weapons hit this).
+    #[test]
+    fn cached_flat_mesh_is_not_popped() {
+        let mut builder = GlbBuilder::new();
+        let before = builder.meshes_json.len();
+        builder.meshes_json.push(empty_mesh_json());
+        builder.meshes_json.push(empty_mesh_json());
+
+        builder.build_nmc_hierarchy(&dummy_packed(), &one_node_nmc(), &[], true, false);
+
+        assert_eq!(
+            builder.meshes_json.len(),
+            before + 2,
+            "a cache-served flat mesh must not be popped"
+        );
+    }
+
+    /// A freshly packed flat mesh is still replaced by the per-node meshes.
+    #[test]
+    fn fresh_flat_mesh_is_popped() {
+        let mut builder = GlbBuilder::new();
+        let before = builder.meshes_json.len();
+        builder.meshes_json.push(empty_mesh_json());
+        builder.meshes_json.push(empty_mesh_json());
+
+        builder.build_nmc_hierarchy(&dummy_packed(), &one_node_nmc(), &[], true, true);
+
+        assert_eq!(
+            builder.meshes_json.len(),
+            before + 1,
+            "a freshly appended flat mesh must be popped"
+        );
+    }
+}

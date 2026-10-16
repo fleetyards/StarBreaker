@@ -41,6 +41,7 @@ from ...manifest import (
 )
 from ...material_contract import ContractInput, ShaderGroupContract
 from ...templates import (
+    alpha_test_threshold,
     material_palette_channels,
     representative_textures,
     smoothness_texture_reference,
@@ -58,6 +59,7 @@ from ..record_utils import (
     _uses_vertex_color_tint,
     _layer_texture_reference,
     _mesh_decal_authored_emission_strength,
+    _mesh_decal_diffuse_multipliers,
     _matching_texture_reference,
     _mean_triplet,
     _public_param_triplet,
@@ -307,9 +309,9 @@ class MaterialsMixin:
         if image_node is None:
             return None
         group_node = nodes.new("ShaderNodeGroup")
-        group_node.node_tree = self._ensure_runtime_color_to_luma_group()
+        group_node.node_tree = self._ensure_runtime_specular_map_luma_group()
         group_node.location = (x + 180, y)
-        group_node.label = "StarBreaker Color To Luma"
+        group_node.label = "StarBreaker Specular Map Luma"
         image_node.id_data.links.new(image_node.outputs[0], group_node.inputs["Color"])
         return group_node.outputs["Luma"]
 
@@ -640,7 +642,72 @@ class MaterialsMixin:
         self._configure_material(material, blend_method=plan.blend_method, shadow_method=plan.shadow_method)
         return True
 
+    def _scaled_mesh_decal_source(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        submaterial: SubmaterialRecord,
+        group_contract: ShaderGroupContract,
+        contract_input: ContractInput,
+        source_socket: bpy.types.NodeSocket,
+        *,
+        x: int,
+        y: int,
+    ) -> bpy.types.NodeSocket:
+        """Scale a diffuse decal's own texture by its authored Diffuse/Opacity.
 
+        See ``_mesh_decal_diffuse_multipliers``; returns ``source_socket``
+        unchanged when the factors are neutral or do not apply.
+        """
+        if group_contract.name != "SB_MeshDecal_v1":
+            return source_socket
+        colour, opacity = _mesh_decal_diffuse_multipliers(submaterial)
+        if contract_input.name == "TexSlot1_DecalSource" and colour is not None:
+            multiply = nodes.new("ShaderNodeMix")
+            multiply.data_type = "RGBA"
+            multiply.blend_type = "MULTIPLY"
+            multiply.label = "Authored Diffuse"
+            multiply.location = (x, y)
+            multiply.inputs[0].default_value = 1.0
+            links.new(source_socket, multiply.inputs[6])
+            multiply.inputs[7].default_value = (colour[0], colour[1], colour[2], 1.0)
+            return multiply.outputs[2]
+        if contract_input.name == "TexSlot1_DecalSource_alpha" and opacity is not None:
+            multiply = nodes.new("ShaderNodeMath")
+            multiply.operation = "MULTIPLY"
+            multiply.label = "Authored Opacity"
+            multiply.location = (x, y)
+            links.new(source_socket, multiply.inputs[0])
+            multiply.inputs[1].default_value = opacity
+            return multiply.outputs[0]
+        return source_socket
+
+    def _alpha_tested_socket(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        submaterial: SubmaterialRecord,
+        alpha_socket: bpy.types.NodeSocket | None,
+        *,
+        x: int,
+        y: int,
+    ) -> bpy.types.NodeSocket | None:
+        """Snap alpha to 0/1 at the authored ``AlphaTest`` cut-off.
+
+        Blender 5 has no material alpha threshold, so an alpha-tested surface
+        would otherwise render its texture alpha as partial transparency.
+        """
+        threshold = alpha_test_threshold(submaterial)
+        if alpha_socket is None or threshold is None:
+            return alpha_socket
+        compare = nodes.new("ShaderNodeMath")
+        compare.operation = "GREATER_THAN"
+        compare.label = "Alpha Test"
+        compare.location = (x, y)
+        links.new(alpha_socket, compare.inputs[0])
+        # CryEngine keeps alpha >= AlphaTest; GREATER_THAN is strict.
+        compare.inputs[1].default_value = threshold - 1e-4
+        return compare.outputs[0]
 
     def _contract_input_source_socket(
         self,

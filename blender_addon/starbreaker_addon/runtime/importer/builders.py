@@ -46,6 +46,7 @@ from ..constants import (
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets, _set_group_input_default
 from ..package_ops import _string_prop
 from ..record_utils import (
+    _emissive_opacity_factor,
     _float_authored_attribute,
     _float_public_param,
     _hard_surface_angle_shift_enabled,
@@ -495,13 +496,46 @@ class BuildersMixin:
             self._patch_glass_template_lightpath(group)
         if group is not None and group_contract.name == "SB_MeshDecal_v1":
             self._patch_mesh_decal_template_emission(group)
+            self._patch_mesh_decal_template_metal(group)
         return group
 
     def _patch_glass_template_lightpath(self, group: bpy.types.ShaderNodeTree) -> None:
-        """Patch the bundled GlassPBR template to the live validated graph."""
-        if group.get("starbreaker_glass_lightpath_patch_version") == 4:
+        """Patch the bundled GlassPBR template to the live validated graph.
+
+        Roughness comes from the authored ``RefractionGloss`` (1 = clear),
+        with the wear gloss texture mixed in by ``WearBlendBase``. TexSlot6
+        holds the gloss of the worn layer only: used as the glass gloss, the
+        Constellation canopy (``glass_canopy_gloss``, ~0.5) rendered as
+        frosted glass while it is authored clear.
+        """
+        if group.get("starbreaker_glass_lightpath_patch_version") == 5:
             return
-        ddna_group = self._ensure_runtime_ddna_roughness_group()
+        for socket_name, default in (("Param_RefractionGloss", 1.0), ("Param_WearBlendBase", 0.0)):
+            existing = next(
+                (
+                    item
+                    for item in group.interface.items_tree
+                    if getattr(item, "item_type", "") == "SOCKET"
+                    and item.in_out == "INPUT"
+                    and item.name == socket_name
+                ),
+                None,
+            )
+            if existing is None:
+                existing = group.interface.new_socket(name=socket_name, in_out="INPUT", socket_type="NodeSocketFloat")
+            existing.default_value = default
+        wear_gloss_item = next(
+            (
+                item
+                for item in group.interface.items_tree
+                if getattr(item, "item_type", "") == "SOCKET"
+                and item.in_out == "INPUT"
+                and item.name == "TexSlot6_WearGloss"
+            ),
+            None,
+        )
+        if wear_gloss_item is not None and hasattr(wear_gloss_item, "default_value"):
+            wear_gloss_item.default_value = (1.0, 1.0, 1.0, 1.0)
         nodes = group.nodes
         links = group.links
         group_input = next((n for n in nodes if n.bl_idname == "NodeGroupInput"), None)
@@ -528,16 +562,18 @@ class BuildersMixin:
         normal_map.space = "TANGENT"
         normal_map.inputs["Strength"].default_value = 0.25
 
-        map_range = nodes.new("ShaderNodeMapRange")
-        map_range.name = "Map Range"
-        map_range.location = (790.1220703125, -230.03060913085938)
-        map_range.data_type = "FLOAT"
-        map_range.interpolation_type = "LINEAR"
-        map_range.clamp = True
-        map_range.inputs[1].default_value = 0.0
-        map_range.inputs[2].default_value = 0.8000000715255737
-        map_range.inputs[3].default_value = 0.07000000029802322
-        map_range.inputs[4].default_value = 1.0
+        gloss_mix = nodes.new("ShaderNodeMix")
+        gloss_mix.name = "Wear Gloss Mix"
+        gloss_mix.data_type = "FLOAT"
+        gloss_mix.clamp_factor = True
+        gloss_mix.location = (474.0, -230.0)
+
+        gloss_to_roughness = nodes.new("ShaderNodeMath")
+        gloss_to_roughness.name = "Gloss To Roughness"
+        gloss_to_roughness.operation = "SUBTRACT"
+        gloss_to_roughness.use_clamp = True
+        gloss_to_roughness.inputs[0].default_value = 1.0
+        gloss_to_roughness.location = (790.0, -230.0)
 
         hue_saturation = nodes.new("ShaderNodeHueSaturation")
         hue_saturation.name = "Hue/Saturation/Value"
@@ -559,21 +595,17 @@ class BuildersMixin:
 
         maths = nodes.new("ShaderNodeMath")
         maths.name = "Maths"
-        maths.location = (478.7479553222656, -291.1023254394531)
+        maths.location = (1040.0, -230.0)
         maths.operation = "MULTIPLY"
-        maths.use_clamp = False
-
-        roughness_group = nodes.new("ShaderNodeGroup")
-        roughness_group.name = "StarBreaker Runtime DDNA Roughness"
-        roughness_group.location = (193.330810546875, -532.6305541992188)
-        roughness_group.node_tree = ddna_group
+        maths.use_clamp = True
 
         tint_color_socket = _output_socket(group_input, "TexSlot4_TintColor")
         palette_glass_socket = _output_socket(group_input, "Palette_Glass")
         normal_socket = _output_socket(group_input, "TexSlot2_NormalGloss")
         smoothness_socket = _output_socket(group_input, "TexSlot6_WearGloss")
         dirt_socket = _output_socket(group_input, "TexSlot11_Dirt")
-        roughness_socket = _output_socket(roughness_group, "Roughness") or roughness_group.outputs[0]
+        refraction_gloss_socket = _output_socket(group_input, "Param_RefractionGloss")
+        wear_blend_socket = _output_socket(group_input, "Param_WearBlendBase")
         shader_output_socket = _output_socket(principled, "BSDF") or principled.outputs[0]
         if (
             tint_color_socket is None
@@ -581,6 +613,8 @@ class BuildersMixin:
             or normal_socket is None
             or smoothness_socket is None
             or dirt_socket is None
+            or refraction_gloss_socket is None
+            or wear_blend_socket is None
         ):
             return
 
@@ -588,16 +622,18 @@ class BuildersMixin:
         links.new(palette_glass_socket, mix_legacy.inputs[2])
         links.new(normal_socket, normal_map.inputs["Color"])
         links.new(_output_socket(mix_legacy, "Color") or mix_legacy.outputs[0], hue_saturation.inputs["Color"])
-        links.new(_output_socket(map_range, "Result") or map_range.outputs[0], _input_socket(principled, "Roughness"))
         links.new(shader_output_socket, shader_input)
-        links.new(smoothness_socket, _input_socket(roughness_group, "Smoothness") or roughness_group.inputs[0])
-        links.new(roughness_socket, maths.inputs[0])
+        links.new(wear_blend_socket, gloss_mix.inputs["Factor"])
+        links.new(refraction_gloss_socket, gloss_mix.inputs["A"])
+        links.new(smoothness_socket, gloss_mix.inputs["B"])
+        links.new(gloss_mix.outputs["Result"], gloss_to_roughness.inputs[1])
+        links.new(_output_socket(gloss_to_roughness, "Value") or gloss_to_roughness.outputs[0], maths.inputs[0])
         links.new(dirt_socket, maths.inputs[1])
-        links.new(_output_socket(maths, "Value") or maths.outputs[0], map_range.inputs[0])
+        links.new(_output_socket(maths, "Value") or maths.outputs[0], _input_socket(principled, "Roughness"))
         links.new(_output_socket(hue_saturation, "Color") or hue_saturation.outputs[0], _input_socket(principled, "Base Color"))
         links.new(_output_socket(normal_map, "Normal") or normal_map.outputs[0], _input_socket(principled, "Normal"))
         group["starbreaker_glass_lightpath_patched"] = 1
-        group["starbreaker_glass_lightpath_patch_version"] = 4
+        group["starbreaker_glass_lightpath_patch_version"] = 5
 
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:
@@ -766,6 +802,130 @@ class BuildersMixin:
 
         group["starbreaker_mesh_decal_emission_patch_version"] = 4
 
+    #: Decoded F0 range over which a MeshDecal texel turns from dielectric to
+    #: metal. Dielectrics author F0 0.02-0.05 and metals >= 0.5; component POM
+    #: atlases sit up to ~0.45 (sRGB ~186) and must stay dielectric.
+    _MESH_DECAL_METAL_F0_RANGE = (0.40, 0.55)
+    _MESH_DECAL_METAL_PATCH_VERSION = 1
+
+    @classmethod
+    def _patch_mesh_decal_template_metal(cls, group: bpy.types.ShaderNodeTree) -> None:
+        """Render metal texels of a MeshDecal atlas as metal.
+
+        CryEngine encodes metal as near-black diffuse plus a bright sRGB spec
+        (F0) map. The template only fed the spec map into ``Specular IOR
+        Level`` (scaled by the host's dielectric specular), so the dark
+        polished-metal tiles of e.g. ``rsi_pom_B`` (diffuse ~0.03, F0 ~0.7)
+        rendered as matte black patches on the Constellation hull.
+
+        Texels whose decoded F0 passes ``_MESH_DECAL_METAL_F0_RANGE`` now get
+        that F0 as base colour, full metallic and the decal's own roughness
+        (``Decal Roughness``; -1 = unset, falls back to ``Host Roughness``).
+        """
+        if group.get("starbreaker_mesh_decal_metal_patch_version") == cls._MESH_DECAL_METAL_PATCH_VERSION:
+            return
+
+        nodes = group.nodes
+        links = group.links
+        group_input = next((node for node in nodes if node.bl_idname == "NodeGroupInput"), None)
+        principled = nodes.get("Principled BSDF")
+        host_tint = nodes.get("Apply Host Tint")
+        roughness_mix = nodes.get("Mix.001")
+        if group_input is None or principled is None or host_tint is None or roughness_mix is None:
+            return
+
+        if _output_socket(group_input, "Decal Roughness") is None:
+            try:
+                group.interface.new_socket(name="Decal Roughness", in_out="INPUT", socket_type="NodeSocketFloat")
+            except Exception:
+                return
+        for item in group.interface.items_tree:
+            if getattr(item, "item_type", "") == "SOCKET" and item.in_out == "INPUT" and item.name == "Decal Roughness":
+                item.default_value = -1.0
+                item.min_value = -1.0
+                item.max_value = 1.0
+
+        spec_socket = _output_socket(group_input, "TexSlot2_Specular")
+        decal_roughness_socket = _output_socket(group_input, "Decal Roughness")
+        host_roughness_socket = _output_socket(group_input, "Host Roughness")
+        base_color_input = _input_socket(principled, "Base Color")
+        metallic_input = _input_socket(principled, "Metallic")
+        roughness_input = _input_socket(principled, "Roughness")
+        if None in (
+            spec_socket,
+            decal_roughness_socket,
+            host_roughness_socket,
+            base_color_input,
+            metallic_input,
+            roughness_input,
+        ):
+            return
+
+        def _node(name: str, bl_idname: str, label: str, location: tuple[float, float]) -> bpy.types.Node:
+            node = nodes.get(name)
+            if node is not None and node.bl_idname != bl_idname:
+                nodes.remove(node)
+                node = None
+            if node is None:
+                node = nodes.new(bl_idname)
+                node.name = name
+            node.label = label
+            node.location = location
+            return node
+
+        def _link(from_socket: Any, to_socket: Any) -> None:
+            for link in list(to_socket.links):
+                links.remove(link)
+            links.new(from_socket, to_socket)
+
+        x, y = principled.location.x - 480, principled.location.y + 360
+
+        # The spec image is sampled as Non-Color; CryEngine stores it in sRGB.
+        f0 = _node("SB Decal Metal F0", "ShaderNodeGamma", "Spec sRGB -> F0", (x - 480, y))
+        f0.inputs["Gamma"].default_value = 2.2
+        _link(spec_socket, f0.inputs["Color"])
+
+        f0_luma = _node("SB Decal Metal F0 Luma", "ShaderNodeRGBToBW", "F0 Luma", (x - 300, y))
+        _link(f0.outputs[0], f0_luma.inputs[0])
+
+        mask = _node("SB Decal Metal Mask", "ShaderNodeMapRange", "Metal Mask", (x - 120, y))
+        mask.clamp = True
+        mask.inputs["From Min"].default_value = cls._MESH_DECAL_METAL_F0_RANGE[0]
+        mask.inputs["From Max"].default_value = cls._MESH_DECAL_METAL_F0_RANGE[1]
+        mask.inputs["To Min"].default_value = 0.0
+        mask.inputs["To Max"].default_value = 1.0
+        _link(f0_luma.outputs[0], mask.inputs["Value"])
+        mask_socket = mask.outputs["Result"]
+
+        base_mix = _node("SB Decal Metal Base Color", "ShaderNodeMix", "Metal Base Color", (x + 120, y))
+        base_mix.data_type = "RGBA"
+        base_mix.blend_type = "MIX"
+        _link(mask_socket, base_mix.inputs[0])
+        _link(host_tint.outputs[2], base_mix.inputs[6])
+        _link(f0.outputs[0], base_mix.inputs[7])
+        _link(base_mix.outputs[2], base_color_input)
+        _link(mask_socket, metallic_input)
+
+        unset = _node("SB Decal Roughness Unset", "ShaderNodeMath", "Decal Roughness Unset", (x - 120, y - 200))
+        unset.operation = "LESS_THAN"
+        unset.inputs[1].default_value = 0.0
+        _link(decal_roughness_socket, unset.inputs[0])
+
+        own_rough = _node("SB Decal Own Roughness", "ShaderNodeMix", "Decal Own Roughness", (x + 120, y - 200))
+        own_rough.data_type = "FLOAT"
+        _link(unset.outputs[0], own_rough.inputs[0])
+        _link(decal_roughness_socket, own_rough.inputs[2])
+        _link(host_roughness_socket, own_rough.inputs[3])
+
+        rough_mix = _node("SB Decal Metal Roughness", "ShaderNodeMix", "Metal Roughness", (x + 300, y - 200))
+        rough_mix.data_type = "FLOAT"
+        _link(mask_socket, rough_mix.inputs[0])
+        _link(roughness_mix.outputs[0], rough_mix.inputs[2])
+        _link(own_rough.outputs[0], rough_mix.inputs[3])
+        _link(rough_mix.outputs[0], roughness_input)
+
+        group["starbreaker_mesh_decal_metal_patch_version"] = cls._MESH_DECAL_METAL_PATCH_VERSION
+
     def _build_contract_group_material(
         self,
         material: bpy.types.Material,
@@ -917,6 +1077,17 @@ class BuildersMixin:
                     x=-220,
                     y=y,
                 )
+                if source_socket is not None:
+                    source_socket = self._scaled_mesh_decal_source(
+                        nodes,
+                        links,
+                        submaterial,
+                        group_contract,
+                        contract_input,
+                        source_socket,
+                        x=-60,
+                        y=y,
+                    )
             if source_socket is not None:
                 links.new(source_socket, target_socket)
             else:
@@ -967,7 +1138,7 @@ class BuildersMixin:
         emissive_strength = max(
             _mean_triplet(emissive_triplet) or 0.0,
             _float_authored_attribute(submaterial, "Glow"),
-        )
+        ) * _emissive_opacity_factor(submaterial)
         if emissive_strength > 0.0 and not group_handles_emission:
             emissive_color_path = self._texture_export_path(submaterial, "emissive") or representative_textures(
                 submaterial
@@ -1481,10 +1652,17 @@ class BuildersMixin:
             nodes,
             links,
             base_color_socket=decal_palette.color if decal_palette.color is not None else (primary_color_node.outputs[0] if primary_color_node is not None else None),
-            base_alpha_socket=(
-                (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
-                if plan.uses_alpha
-                else None
+            base_alpha_socket=self._alpha_tested_socket(
+                nodes,
+                links,
+                submaterial,
+                (
+                    (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
+                    if plan.uses_alpha
+                    else None
+                ),
+                x=-460,
+                y=380,
             ),
             normal_color_socket=primary_normal_node.outputs[0] if primary_normal_node is not None else None,
             roughness_socket=primary_roughness,
@@ -1540,10 +1718,17 @@ class BuildersMixin:
                 nodes,
                 links,
                 base_color_socket=secondary_color_node.outputs[0] if secondary_color_node is not None else None,
-                base_alpha_socket=(
-                    _output_socket(secondary_color_node, "Alpha")
-                    if (secondary_color_node is not None and plan.uses_alpha)
-                    else None
+                base_alpha_socket=self._alpha_tested_socket(
+                    nodes,
+                    links,
+                    submaterial,
+                    (
+                        _output_socket(secondary_color_node, "Alpha")
+                        if (secondary_color_node is not None and plan.uses_alpha)
+                        else None
+                    ),
+                    x=-460,
+                    y=-420,
                 ),
                 normal_color_socket=secondary_normal_node.outputs[0] if secondary_normal_node is not None else None,
                 roughness_socket=secondary_roughness,
@@ -2614,32 +2799,63 @@ class BuildersMixin:
                 return (float(r), float(g), float(b))
         return fallback
 
+    #: Bumped whenever the Illum POM host variant wiring changes, so clones
+    #: saved by an older addon are rebuilt instead of reused.
+    _ILLUM_POM_HOST_VARIANT_VERSION = 2
+
+    #: Bumped whenever the MeshDecal palette-channel variant wiring changes.
+    _MESH_DECAL_HOST_VARIANT_VERSION = 2
+
     def _ensure_illum_pom_host_rgb_variant(
         self,
         material: bpy.types.Material,
         rgb: tuple[float, float, float],
+        host_specular: float | None = None,
     ) -> bpy.types.Material:
-        """Clone an Illum POM decal material and tint its runtime
-        LayerSurface inputs with a fixed host RGB.
+        """Clone an Illum POM decal material and give it the host panel's
+        colour and reflectance.
 
-        This mirrors the MeshDecal host-RGB fallback for decal materials
-        that are authored as ``Illum`` + ``DECAL`` + ``POM`` rather than
-        ``MeshDecal``. Those materials still need to inherit the host
-        panel colour instead of rendering their white decal atlas at face
-        value.
+        This mirrors the MeshDecal host variants for decal materials that
+        are authored as ``Illum`` + ``DECAL`` + ``POM`` rather than
+        ``MeshDecal``. The decal atlas is white with a metal-like spec map
+        (F0 ~0.22): rendered at face value the recessed hull panels (e.g.
+        the Constellation's VTOL hatch insets) show up as bright white
+        patches. The clone keeps the decal's normal, gloss and parallax but
+        takes the host tint and the host's dielectric reflectance.
         """
         if material is None or material.node_tree is None:
             return material
         rgb_key = self._rgb_variant_key(rgb)
+        specular = 0.04 if host_specular is None else max(0.0, min(1.0, float(host_specular)))
         base_material = self._decal_host_variant_base_material(material)
         clone_name = f"{self._decal_host_variant_base_name(material)}__host_rgb_{rgb_key}"
         clone = bpy.data.materials.get(clone_name)
-        if clone is not None and clone.get("starbreaker_decal_host_rgb_key") == rgb_key:
+        if (
+            clone is not None
+            and clone.get("starbreaker_decal_host_rgb_key") == rgb_key
+            and clone.get("starbreaker_decal_host_variant_version") == self._ILLUM_POM_HOST_VARIANT_VERSION
+            and abs(float(clone.get("starbreaker_decal_host_specular", -1.0)) - specular) < 1e-6
+        ):
             return clone
         if clone is None:
             clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_rgb_key"] = rgb_key
+        clone["starbreaker_decal_host_variant_version"] = self._ILLUM_POM_HOST_VARIANT_VERSION
+        clone["starbreaker_decal_host_specular"] = specular
+
+        links = clone.node_tree.links
+
+        def _set_unlinked(node: bpy.types.Node, name: str, value: Any) -> None:
+            socket = node.inputs.get(name)
+            if socket is None:
+                return
+            for link in list(socket.links):
+                links.remove(link)
+            try:
+                socket.default_value = value
+            except Exception:
+                pass
 
         for node in clone.node_tree.nodes:
             if node.bl_idname != "ShaderNodeGroup":
@@ -2647,14 +2863,16 @@ class BuildersMixin:
             tree = getattr(node, "node_tree", None)
             if tree is None or tree.name != "StarBreaker Runtime LayerSurface":
                 continue
-            tint_socket = node.inputs.get("Tint Color")
-            if tint_socket is not None:
-                for link in list(tint_socket.links):
-                    clone.node_tree.links.remove(link)
-                try:
-                    tint_socket.default_value = (rgb[0], rgb[1], rgb[2], 1.0)
-                except Exception:
-                    pass
+            _set_unlinked(node, "Tint Color", (rgb[0], rgb[1], rgb[2], 1.0))
+            # The host tint already carries the palette colour; a black
+            # palette input (no material channel) would zero it out. A
+            # white host means no host colour was found, so leave those
+            # panels dark rather than rendering the white atlas.
+            if tuple(round(float(c), 6) for c in rgb[:3]) != (1.0, 1.0, 1.0):
+                _set_unlinked(node, "Palette Color", (1.0, 1.0, 1.0, 1.0))
+            _set_unlinked(node, "Specular Value", 0.0)
+            _set_unlinked(node, "Metallic", 0.0)
+            _set_unlinked(node, "Palette Specular", specular)
         return clone
 
     def _ensure_mesh_decal_host_variant(
@@ -2678,12 +2896,18 @@ class BuildersMixin:
         base_material = self._decal_host_variant_base_material(material)
         clone_name = f"{self._decal_host_variant_base_name(material)}__host_{channel}"
         clone = bpy.data.materials.get(clone_name)
-        if clone is not None and clone.get("starbreaker_decal_host_channel") == channel:
+        if (
+            clone is not None
+            and clone.get("starbreaker_decal_host_channel") == channel
+            and clone.get("starbreaker_decal_host_variant_version") == self._MESH_DECAL_HOST_VARIANT_VERSION
+        ):
             return clone
+        # A clone saved by an older addon is rewired in place below.
         if clone is None:
             clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_channel"] = channel
+        clone["starbreaker_decal_host_variant_version"] = self._MESH_DECAL_HOST_VARIANT_VERSION
 
         nodes = clone.node_tree.nodes
         links = clone.node_tree.links
@@ -2743,6 +2967,21 @@ class BuildersMixin:
                 links.new(spec_source, spec_input)
 
         rough_input = decal_group_node.inputs.get("Host Roughness")
+        # Metal texels keep the decal's own (DDNA) roughness; see
+        # ``_patch_mesh_decal_template_metal``.
+        decal_rough_input = decal_group_node.inputs.get("Decal Roughness")
+        ddna_roughness = next(
+            (
+                _output_socket(n, "Roughness")
+                for n in nodes
+                if n.bl_idname == "ShaderNodeGroup"
+                and getattr(n, "node_tree", None) is not None
+                and n.node_tree.name.startswith("StarBreaker Runtime DDNA Roughness")
+            ),
+            None,
+        )
+        if decal_rough_input is not None and ddna_roughness is not None and not decal_rough_input.is_linked:
+            links.new(ddna_roughness, decal_rough_input)
         gloss_output_name = self._MESH_DECAL_HOST_CHANNEL_GLOSS.get(channel)
         if rough_input is not None and gloss_output_name is not None:
             gloss_source = _output_socket(palette_group_node, gloss_output_name)
@@ -2828,20 +3067,22 @@ class BuildersMixin:
                 variant = self._ensure_mesh_decal_host_variant(mat, channel, palette)
             else:
                 variant_rgb = None
+                host_specular = None
                 if channel is not None and palette is not None:
                     variant_rgb = palette_color(palette, channel)
+                    host_specular = _mean_triplet(palette_finish_specular(palette, channel))
                 if variant_rgb is None:
                     variant_rgb = resolved_fallback_rgb
                 if variant_rgb is None:
                     continue
                 key = mat.get("starbreaker_decal_host_rgb_key")
                 rgb_key = self._rgb_variant_key(variant_rgb)
-                if key == rgb_key:
-                    continue
                 if is_mesh_decal:
+                    if key == rgb_key:
+                        continue
                     variant = self._ensure_mesh_decal_host_rgb_variant(mat, variant_rgb)
                 else:
-                    variant = self._ensure_illum_pom_host_rgb_variant(mat, variant_rgb)
+                    variant = self._ensure_illum_pom_host_rgb_variant(mat, variant_rgb, host_specular)
             if variant is not mat:
                 slot.material = variant
                 rebound += 1

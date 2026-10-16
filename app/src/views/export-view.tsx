@@ -56,6 +56,7 @@ export function ExportView() {
   const overwriteExistingAssets = useExportStore((s) => s.overwriteExistingAssets);
   const includeAnimations = useExportStore((s) => s.includeAnimations);
   const includeObjectTypeDirectory = useExportStore((s) => s.includeObjectTypeDirectory);
+  const separateInteriorCollection = useExportStore((s) => s.separateInteriorCollection);
   const threads = useExportStore((s) => s.threads);
   const outputDir = useExportStore((s) => s.outputDir);
   const setLod = useExportStore((s) => s.setLod);
@@ -68,6 +69,7 @@ export function ExportView() {
   const setOverwriteExistingAssets = useExportStore((s) => s.setOverwriteExistingAssets);
   const setIncludeAnimations = useExportStore((s) => s.setIncludeAnimations);
   const setIncludeObjectTypeDirectory = useExportStore((s) => s.setIncludeObjectTypeDirectory);
+  const setSeparateInteriorCollection = useExportStore((s) => s.setSeparateInteriorCollection);
   const setThreads = useExportStore((s) => s.setThreads);
   const setOutputDir = useExportStore((s) => s.setOutputDir);
 
@@ -202,6 +204,7 @@ export function ExportView() {
       include_nodraw: false,
       include_animations: isBlendExport ? true : includeAnimations,
       include_object_type_directory: includeObjectTypeDirectory,
+      separate_interior_collection: isBlendExport && includeInterior && separateInteriorCollection,
     };
     setExporting(true);
     setProgress(
@@ -751,6 +754,19 @@ export function ExportView() {
                 Include interiors
               </span>
             </label>
+            {isBlendExport && includeInterior && (
+              <label className="flex items-center gap-2.5 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={separateInteriorCollection}
+                  onChange={(e) => setSeparateInteriorCollection(e.target.checked)}
+                  className="accent-accent w-3.5 h-3.5 rounded"
+                />
+                <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                  Separate interior collection
+                </span>
+              </label>
+            )}
             {!isBlendExport && (
               <>
                 <label className="flex items-center gap-2.5 cursor-pointer group">

@@ -176,6 +176,7 @@ class ImporterUnderTest(BuildersMixin):
         self.channel = channel
         self.fallback_rgb = fallback_rgb
         self.illum_rgb_calls: list[tuple[float, float, float]] = []
+        self.illum_specular_calls: list[float | None] = []
 
     def _mesh_decal_host_channel_for_object(self, obj):
         return self.channel
@@ -183,8 +184,9 @@ class ImporterUnderTest(BuildersMixin):
     def _mesh_decal_host_rgb_for_object(self, obj):
         return self.fallback_rgb
 
-    def _ensure_illum_pom_host_rgb_variant(self, material, rgb):
+    def _ensure_illum_pom_host_rgb_variant(self, material, rgb, host_specular=None):
         self.illum_rgb_calls.append(rgb)
+        self.illum_specular_calls.append(host_specular)
         return FakeMaterial(f"{material.name}__host_rgb", **dict(material))
 
 
@@ -521,6 +523,7 @@ class DecalOffsetTests(unittest.TestCase):
             secondary=(0.5, 0.6, 0.7),
             tertiary=(0.8, 0.1, 0.2),
             glass=(0.9, 0.9, 0.95),
+            raw={"finish": {"primary": {"specular": [0.03, 0.04, 0.05]}}},
         )
         importer = ImporterUnderTest(channel="primary", fallback_rgb=None)
 
@@ -528,6 +531,7 @@ class DecalOffsetTests(unittest.TestCase):
 
         self.assertEqual(rebound, 1)
         self.assertEqual(importer.illum_rgb_calls, [palette.primary])
+        self.assertAlmostEqual(importer.illum_specular_calls[0], 0.04)
         self.assertEqual(obj.material_slots[0].material.name, "drak_vulture:pom_decals__host_rgb")
 
     def test_illum_pom_rebind_prefers_palette_channel_rgb_over_fallback_rgb(self) -> None:
@@ -548,6 +552,7 @@ class DecalOffsetTests(unittest.TestCase):
             secondary=(0.5, 0.6, 0.7),
             tertiary=(0.8, 0.1, 0.2),
             glass=(0.9, 0.9, 0.95),
+            raw={},
         )
         importer = ImporterUnderTest(
             channel="primary",

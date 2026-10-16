@@ -64,7 +64,7 @@ SCENE_SHARED_GLOW_PROP = "starbreaker_shared_glow_strength"
 SURFACE_SHADER_MODE_PRINCIPLED = "principled_first"
 SURFACE_SHADER_MODE_GLASS = "glass_bsdf"
 DECAL_OFFSET_MODIFIER_NAME = "StarBreaker Decal Offset"
-DECAL_OFFSET_EXTERNAL_DEFAULT = 0.005
+DECAL_OFFSET_EXTERNAL_DEFAULT = 0.0005
 DECAL_OFFSET_INTERNAL_DEFAULT = 0.001
 
 POM_DETAIL_DEFAULT = "MEDIUM"
@@ -129,4 +129,4 @@ SCENE_AXIS_CONVERSION = Matrix(
 SCENE_AXIS_CONVERSION_INV = SCENE_AXIS_CONVERSION.inverted()
 GLTF_LIGHT_BASIS_CORRECTION = Quaternion((math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0))
 NON_COLOR_INPUT_KEYWORDS = ("normal", "roughness", "gloss", "mask", "height", "specular", "opacity", "id_map")
-MATERIAL_IDENTITY_SCHEMA = "runtime_material_v11"
+MATERIAL_IDENTITY_SCHEMA = "runtime_material_v13"

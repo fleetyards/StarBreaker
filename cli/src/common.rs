@@ -67,6 +67,13 @@ pub struct ExportOpts {
     /// Include shield helper meshes and shield attachments in exports
     #[arg(long)]
     pub include_shields: bool,
+    /// Subdirectory under `Packages/` for decomposed exports (e.g. `ship`),
+    /// matching the object-type folder the desktop app writes into
+    #[arg(long)]
+    pub package_subdir: Option<String>,
+    /// Put interiors into their own collection in the decomposed scene.blend
+    #[arg(long)]
+    pub separate_interior_collection: bool,
 }
 
 impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
@@ -104,7 +111,11 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             include_animations: matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             default_animation_tags: vec!["landing_gear_extend".to_string()],
-            decomposed_package_subdir: None,
+            decomposed_package_subdir: match kind {
+                starbreaker_3d::ExportKind::Decomposed => opts.package_subdir.clone(),
+                starbreaker_3d::ExportKind::Bundled => None,
+            },
+            separate_interior_collection: opts.separate_interior_collection,
         }
     }
 }

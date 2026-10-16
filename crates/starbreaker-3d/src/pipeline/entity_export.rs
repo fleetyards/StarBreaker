@@ -242,6 +242,7 @@ fn load_geometry_parts(
         .unwrap_or(material_path);
     let (mut mesh, mtl_file, textures, mut nmc) =
         load_single_mesh(p4k, &primary_path, effective_material, opts, png_cache, use_model_bbox)?;
+    remap_skin_joints_to_skeleton(p4k, &mut mesh, &primary_path, &skeleton_bones);
 
     if nmc.is_none() {
         nmc = synthesize_nmc_from_bones(&mesh, &skeleton_bones);
@@ -255,9 +256,15 @@ fn load_geometry_parts(
     for part in &resolved.parts[1..] {
         match load_single_mesh(p4k, &part.path, material_path, &no_tex_opts, png_cache, use_model_bbox) {
             Ok((mut extra_mesh, _, _, _)) => {
+                remap_skin_joints_to_skeleton(p4k, &mut extra_mesh, &part.path, &skeleton_bones);
                 if let Some(ref bone_name) = part.bone_name {
                     if let Some(bone) = skeleton_bones.iter().find(|b| b.name.eq_ignore_ascii_case(bone_name)) {
-                        transform_mesh_by_bone(&mut extra_mesh, bone);
+                        transform_mesh_by_bone(
+                            &mut extra_mesh,
+                            bone,
+                            part.attach_rotation,
+                            part.attach_position,
+                        );
                     }
                 }
                 mesh.merge_from(extra_mesh);
@@ -311,6 +318,76 @@ pub(crate) fn load_skeleton(
         }
     }
     Vec::new()
+}
+
+/// Re-index a skin mesh's joints from the skin's own bone list onto `skeleton`.
+///
+/// A `.skin` indexes its vertex joints into its own CompiledBones, which need
+/// not match the `.chr` it is posed with: the Idris gear CHRs add a
+/// `<name>_root` bone at index 1 that the skins lack, so every part followed
+/// the bone one slot further down and the retracted foot pistons stayed below
+/// the hull.
+fn remap_skin_joints_to_skeleton(
+    p4k: &MappedP4k,
+    mesh: &mut crate::types::Mesh,
+    geometry_path: &str,
+    skeleton: &[crate::skeleton::Bone],
+) {
+    if skeleton.is_empty() {
+        return;
+    }
+    let Some(mesh_bones) = p4k
+        .entry_case_insensitive(&datacore_path_to_p4k(geometry_path))
+        .and_then(|entry| p4k.read(entry).ok())
+        .and_then(|data| crate::skeleton::parse_skeleton(&data))
+    else {
+        return;
+    };
+    let Some(remap) = skin_joint_remap(&mesh_bones, skeleton) else {
+        return;
+    };
+    log::debug!("  re-indexed skin joints of {geometry_path} onto its skeleton");
+    apply_joint_remap(mesh, &remap);
+}
+
+/// Skin bone index -> skeleton bone index by name, or `None` when the lists
+/// already agree. Bones the skeleton lacks keep their index.
+fn skin_joint_remap(
+    mesh_bones: &[crate::skeleton::Bone],
+    skeleton: &[crate::skeleton::Bone],
+) -> Option<Vec<u16>> {
+    let remap: Vec<u16> = mesh_bones
+        .iter()
+        .enumerate()
+        .map(|(index, bone)| {
+            skeleton
+                .iter()
+                .position(|candidate| candidate.name.eq_ignore_ascii_case(&bone.name))
+                .unwrap_or_else(|| {
+                    log::warn!("  skin bone '{}' missing from skeleton", bone.name);
+                    index
+                }) as u16
+        })
+        .collect();
+    remap
+        .iter()
+        .enumerate()
+        .any(|(index, &mapped)| index as u16 != mapped)
+        .then_some(remap)
+}
+
+fn apply_joint_remap(mesh: &mut crate::types::Mesh, remap: &[u16]) {
+    let map = |joint: u16| remap.get(joint as usize).copied().unwrap_or(joint);
+    for submesh in &mut mesh.submeshes {
+        submesh.node_parent_index = map(submesh.node_parent_index);
+    }
+    for weights in mesh.skin_weights.iter_mut().flatten() {
+        for (joint, weight) in weights.joint_indices.iter_mut().zip(weights.weights) {
+            if weight > 0 {
+                *joint = map(*joint);
+            }
+        }
+    }
 }
 
 /// Look up a `.chrparams` for the given skeleton path, find an animation
@@ -405,10 +482,43 @@ fn swap_extension(path: &str, new_ext: &str) -> Option<String> {
     out.push_str(new_ext);
     Some(out)
 }
-fn transform_mesh_by_bone(mesh: &mut crate::Mesh, bone: &crate::skeleton::Bone) {
-    let [qw, qx, qy, qz] = bone.world_rotation;
-    let rot = glam::Quat::from_xyzw(qx, qy, qz, qw);
-    let trans = glam::Vec3::from(bone.world_position);
+pub(crate) const IDENTITY_QUAT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+
+/// Parse `N` comma-separated floats, e.g. a CDF `Rotation` or `RelPosition`.
+fn parse_floats<const N: usize>(value: &str) -> Option<[f32; N]> {
+    let mut out = [0.0f32; N];
+    let mut count = 0;
+    for field in value.split(',') {
+        if count == N {
+            return None;
+        }
+        out[count] = field.trim().parse().ok()?;
+        count += 1;
+    }
+    (count == N).then_some(out)
+}
+
+/// Place a CA_BONE attachment at its bone.
+///
+/// The attachment carries its own orientation in the CDF (`Rotation`) and its
+/// own offset (`RelPosition`); the bone contributes position only. The bone's
+/// own rotation is deliberately not applied: attachment geometry is authored
+/// axis-aligned to the model, so composing the bone's rotation rotates a decal
+/// off the surface it belongs to.
+///
+/// Measured on the ARGO ATLS, whose CDF attaches four emblem decals to
+/// `L/R_Shoulder` and `L/R_Front_Leg_Armor`: composing the bone rotation puts
+/// 0 of 4 inside the limb they belong to, this rule puts 4 of 4 there, and the
+/// pairs come out mirrored as authored.
+fn transform_mesh_by_bone(
+    mesh: &mut crate::Mesh,
+    bone: &crate::skeleton::Bone,
+    attach_rotation: [f32; 4],
+    attach_position: [f32; 3],
+) {
+    let [qw, qx, qy, qz] = attach_rotation;
+    let rot = glam::Quat::from_xyzw(qx, qy, qz, qw).normalize();
+    let trans = glam::Vec3::from(bone.world_position) + glam::Vec3::from(attach_position);
     let affine = glam::Affine3A::from_rotation_translation(rot, trans);
     let mat3 = glam::Mat3A::from_quat(rot);
 
@@ -456,6 +566,7 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
     let source_normals = mesh.normals.clone();
     let source_tangents = mesh.tangents.clone();
     let source_colors = mesh.colors.clone();
+    let source_skin_weights = mesh.skin_weights.clone();
     let source_indices = mesh.indices.clone();
     let source_submeshes = mesh.submeshes.clone();
 
@@ -465,6 +576,7 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
     let mut rebuilt_normals = source_normals.as_ref().map(|_| Vec::new());
     let mut rebuilt_tangents = source_tangents.as_ref().map(|_| Vec::new());
     let mut rebuilt_colors = source_colors.as_ref().map(|_| Vec::new());
+    let mut rebuilt_skin_weights = source_skin_weights.as_ref().map(|_| Vec::new());
     let mut rebuilt_indices = Vec::new();
     let mut rebuilt_submeshes = Vec::with_capacity(source_submeshes.len());
 
@@ -514,6 +626,9 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
                 if let (Some(source), Some(target)) = (&source_colors, rebuilt_colors.as_mut()) {
                     target.push(source[source_vertex]);
                 }
+                if let (Some(source), Some(target)) = (&source_skin_weights, rebuilt_skin_weights.as_mut()) {
+                    target.push(source[source_vertex]);
+                }
 
                 remap.insert(*source_index, new_index);
                 new_index
@@ -544,6 +659,7 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
     mesh.normals = rebuilt_normals;
     mesh.tangents = rebuilt_tangents;
     mesh.colors = rebuilt_colors;
+    mesh.skin_weights = rebuilt_skin_weights;
     mesh.indices = rebuilt_indices;
     mesh.submeshes = rebuilt_submeshes;
     if !mesh.positions.is_empty() {
@@ -575,6 +691,11 @@ pub(crate) struct GeometryPart {
     pub(crate) bone_name: Option<String>,
     /// Material override from CDF attachment. Takes priority over the DataCore material.
     pub(crate) material_override: Option<String>,
+    /// CDF `Rotation` (w, x, y, z) — the attachment's own orientation at the bone.
+    /// Identity when absent.
+    pub(crate) attach_rotation: [f32; 4],
+    /// CDF `RelPosition` — offset from the bone origin. Zero when absent.
+    pub(crate) attach_position: [f32; 3],
 }
 
 /// Result of resolving a geometry path — all mesh parts plus optional skeleton.
@@ -598,6 +719,8 @@ pub(crate) fn resolve_geometry_files(
                 path: geometry_path.to_string(),
                 bone_name: None,
                 material_override: None,
+                attach_rotation: IDENTITY_QUAT,
+                attach_position: [0.0; 3],
             }],
             skeleton_path: None,
         });
@@ -646,6 +769,14 @@ pub(crate) fn resolve_geometry_files(
                             material_override: attrs.get("Material")
                                 .filter(|s| !s.is_empty())
                                 .map(|s| s.to_string()),
+                            attach_rotation: attrs
+                                .get("Rotation")
+                                .and_then(|value| parse_floats::<4>(value))
+                                .unwrap_or(IDENTITY_QUAT),
+                            attach_position: attrs
+                                .get("RelPosition")
+                                .and_then(|value| parse_floats::<3>(value))
+                                .unwrap_or([0.0; 3]),
                         });
                     }
                 }
@@ -799,6 +930,117 @@ mod tests {
     use super::*;
     use crate::types::SubMesh;
 
+    fn bone_at(world_position: [f32; 3], world_rotation: [f32; 4]) -> crate::skeleton::Bone {
+        crate::skeleton::Bone {
+            name: "L_Shoulder".to_string(),
+            parent_index: None,
+            object_node_index: None,
+            local_position: [0.0; 3],
+            local_rotation: IDENTITY_QUAT,
+            world_position,
+            world_rotation,
+        }
+    }
+
+    fn plate() -> crate::Mesh {
+        crate::Mesh {
+            positions: vec![[-0.269, 0.060, -0.3175]],
+            indices: vec![],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![],
+            model_min: [-0.269, 0.0, -0.34],
+            model_max: [-0.269, 0.161, -0.295],
+            scaling_min: [0.0; 3],
+            scaling_max: [1.0; 3],
+            skin_weights: None,
+        }
+    }
+
+    #[test]
+    fn parses_cdf_rotation_and_rel_position() {
+        assert_eq!(
+            parse_floats::<4>("0.99999994,0,-5.3290684e-15,0"),
+            Some([0.99999994, 0.0, -5.3290684e-15, 0.0]),
+        );
+        assert_eq!(parse_floats::<3>("0,0,0"), Some([0.0, 0.0, 0.0]));
+        assert_eq!(parse_floats::<3>("1, 2, 3"), Some([1.0, 2.0, 3.0]));
+        assert_eq!(parse_floats::<3>("1,2"), None, "too few components");
+        assert_eq!(parse_floats::<3>("1,2,3,4"), None, "too many components");
+        assert_eq!(parse_floats::<3>("1,x,3"), None, "non-numeric");
+    }
+
+    /// A CA_BONE attachment takes position from its bone and orientation from
+    /// its own CDF `Rotation`. Composing the bone's rotation instead rotates
+    /// decals off the surface they belong to: on the ARGO ATLS it moved all
+    /// four emblems outside the limb they are attached to.
+    #[test]
+    fn ca_bone_attachment_takes_position_from_bone_not_rotation() {
+        // The real L_Shoulder: a ~111 degree rotation that must not be applied.
+        let bone = bone_at(
+            [-0.4273144, -0.43144923, 2.668861],
+            [0.033959895, -0.6561711, -0.03896248, 0.75284004],
+        );
+        let mut mesh = plate();
+        transform_mesh_by_bone(&mut mesh, &bone, IDENTITY_QUAT, [0.0; 3]);
+
+        let p = mesh.positions[0];
+        for (got, want) in p.iter().zip([-0.696, -0.371, 2.351].iter()) {
+            assert!((got - want).abs() < 1e-3, "got {p:?}, want [-0.696, -0.371, 2.351]");
+        }
+    }
+
+    #[test]
+    fn ca_bone_attachment_applies_rel_position() {
+        let bone = bone_at([1.0, 2.0, 3.0], IDENTITY_QUAT);
+        let mut mesh = plate();
+        mesh.positions = vec![[0.0, 0.0, 0.0]];
+        transform_mesh_by_bone(&mut mesh, &bone, IDENTITY_QUAT, [0.5, -0.25, 0.125]);
+
+        let p = mesh.positions[0];
+        for (got, want) in p.iter().zip([1.5, 1.75, 3.125].iter()) {
+            assert!((got - want).abs() < 1e-5, "got {p:?}");
+        }
+    }
+
+    fn named_bone(name: &str) -> crate::skeleton::Bone {
+        crate::skeleton::Bone { name: name.to_string(), ..bone_at([0.0; 3], IDENTITY_QUAT) }
+    }
+
+    /// The Idris gear CHR has a `_root` bone the skin lacks; the skin's joint
+    /// indices must follow bone names onto the CHR, not stay positional.
+    #[test]
+    fn skin_joints_follow_bone_names_onto_the_skeleton() {
+        let skin = ["Gear", "Gear_Base", "Gear_Piston"].map(named_bone);
+        let chr = ["Gear", "Gear_root", "gear_base", "Gear_Piston"].map(named_bone);
+        let remap = skin_joint_remap(&skin, &chr).expect("lists differ");
+        assert_eq!(remap, vec![0, 2, 3]);
+        assert_eq!(skin_joint_remap(&skin, &skin), None, "matching lists need no remap");
+
+        let mut mesh = plate();
+        mesh.submeshes = vec![SubMesh {
+            material_name: None,
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 0,
+            first_vertex: 0,
+            num_vertices: 1,
+            node_parent_index: 2,
+        }];
+        mesh.skin_weights = Some(vec![crate::ivo::skin::BoneMap12 {
+            joint_indices: [1, 2, 0, 0],
+            weights: [128, 127, 0, 0],
+        }]);
+        apply_joint_remap(&mut mesh, &remap);
+        assert_eq!(mesh.submeshes[0].node_parent_index, 3);
+        let weights = mesh.skin_weights.unwrap()[0];
+        assert_eq!(weights.joint_indices, [2, 3, 0, 0], "unweighted slots stay untouched");
+    }
+
     #[test]
     fn mesh_material_ids_detect_material_override_that_cannot_cover_mesh() {
         let mesh = crate::Mesh {
@@ -835,6 +1077,7 @@ mod tests {
             model_max: [0.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [0.0; 3],
+            skin_weights: None,
         };
 
         assert!(mesh_material_ids_fit_material_count(&mesh, 3));

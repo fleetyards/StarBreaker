@@ -173,6 +173,8 @@ pub fn write_glb_with_progress(
     report_progress(progress, 0.05, "Packing root mesh");
     // ---- Pack root entity (drop textures after packing) ----
     let mut scene_nodes = if let Some(root_mesh) = input.root_mesh {
+        // See `build_nmc_hierarchy`: only a freshly appended flat mesh may be popped.
+        let meshes_before_pack = builder.meshes_json.len();
         let root_packed = builder.pack_mesh(
             &root_mesh,
             input.root_materials.as_ref(),
@@ -186,7 +188,13 @@ pub fn write_glb_with_progress(
 
         // ---- Build root NMC scene graph ----
         if let Some(nmc) = input.root_nmc.as_ref().filter(|n| !n.nodes.is_empty()) {
-            let root_nodes = builder.build_nmc_hierarchy(&root_packed, nmc, &root_mesh.submeshes, true);
+            let root_nodes = builder.build_nmc_hierarchy(
+                &root_packed,
+                nmc,
+                &root_mesh.submeshes,
+                true,
+                builder.meshes_json.len() > meshes_before_pack,
+            );
             root_nodes
                 .iter()
                 .map(|&i| json::Index::new(i))
@@ -325,6 +333,7 @@ mod tests {
             model_max: [1.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin_weights: None,
         }
     }
 
@@ -943,6 +952,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: String::new(),
+            docking_collar_port: None,
         }
     }
 
@@ -2089,6 +2099,7 @@ mod tests {
             model_max: [3.0, 1.0, 0.0],
             scaling_min: [0.0; 3],
             scaling_max: [3.0, 1.0, 0.0],
+            skin_weights: None,
             submeshes: vec![
                 SubMesh {
                     material_name: Some("mat_a".into()),
@@ -2217,6 +2228,7 @@ mod tests {
             model_max: [1.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin_weights: None,
             submeshes: vec![SubMesh {
                 material_name: None,
                 material_id: 0,

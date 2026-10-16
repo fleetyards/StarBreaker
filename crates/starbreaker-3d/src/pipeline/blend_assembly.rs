@@ -190,11 +190,16 @@ fn entity_root_properties(package_name: &str, entity_name: &str) -> Vec<(String,
 }
 
 fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -> Vec<(String, IdPropValue)> {
+    // `scene_entity_name` and the parent fields name the scene.json child this
+    // object belongs to, so a door's own animation clip can find its parts.
     let instance_json = serde_json::json!({
         "entity_name": instance.name,
         "mesh_asset": instance.mesh_asset,
         "material_sidecar": instance.material_sidecar,
         "palette_id": instance.palette_id,
+        "scene_entity_name": instance.entity_name,
+        "parent_entity_name": instance.parent_entity_name,
+        "parent_node_name": instance.parent_node_name,
     })
     .to_string();
     let mut props = vec![
@@ -227,16 +232,14 @@ fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -
 /// Determine the Blender Displace modifier strength for the decal-offset pass on
 /// a scene instance.
 ///
-/// Interior instances (and all loadout items parented inside the interior) use a
-/// smaller offset (0.001) because interior geometry is scaled more tightly and a
-/// 0.005 offset causes visible lifting on flat panels.  Exterior hull meshes use
-/// 0.005 to clear the thicker paint/decal stacking that occurs on the outside of
-/// the ship.
+/// Decal geometry is authored 0.2-1 mm above the hull; the offset only has to
+/// keep coplanar decals from flickering into it. Exterior hull meshes used
+/// 5 mm, which made the Constellation's and Skylark's decals visibly float.
 ///
 /// Decision tree:
 /// 1. `is_interior == true` → **0.001** (interior geometry + interior loadout)
 /// 2. `material_sidecar` path contains `/ships/` and does **not** contain `_int_`
-///    → **0.005** (exterior hull)
+///    → **0.0005** (exterior hull)
 /// 3. Everything else (exterior loadout/accessories) → **0.001**
 fn instance_decal_offset_strength(instance: &LinkedMeshInstance) -> f64 {
     if instance.is_interior {
@@ -245,7 +248,7 @@ fn instance_decal_offset_strength(instance: &LinkedMeshInstance) -> f64 {
     if let Some(sidecar) = &instance.material_sidecar {
         let lower = sidecar.to_lowercase();
         if lower.contains("/ships/") && !lower.contains("_int_") && !lower.contains("_int_master") {
-            return 0.005;
+            return 0.0005;
         }
     }
     0.001
@@ -921,7 +924,22 @@ pub fn write_decomposed_export_blend(
             nmc: material_view.glb_nmc,
             interior_placement_space: true,
         };
-        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), interior_entry);
+        let mesh_key = mesh_asset.to_ascii_lowercase();
+        // An interior placement writes its asset in scene-axis space as a single
+        // flat mesh. Letting that replace a root/child entry would strip that
+        // asset's node hierarchy (hardpoints, animated parts) and leave it in the
+        // wrong basis, so flag the collision rather than corrupting it silently.
+        if mesh_data_map
+            .get(&mesh_key)
+            .is_some_and(|existing| !existing.interior_placement_space)
+        {
+            log::warn!(
+                "interior placement '{}' reuses entity mesh asset '{mesh_asset}' — \
+                 the flat interior-space variant will replace the node hierarchy",
+                entry.cgf_path
+            );
+        }
+        mesh_data_map.insert(mesh_key, interior_entry);
         Some(loaded)
     };
 
@@ -1353,6 +1371,7 @@ pub fn write_decomposed_export_blend(
         &extracted_lights,
         &light_projector_texture_map,
         &decal_mesh_refs,
+        opts.separate_interior_collection,
     )?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
@@ -1764,7 +1783,7 @@ fn mesh_to_blend_flat(
                 DECAL_OFFSET_MODIFIER_NAME,
                 0,
                 wn_mod_ptr,
-                0.005,
+                0.0005,
                 DECAL_OFFSET_GROUP_NAME,
                 DECAL_OFFSET_MIDLEVEL,
             ));
@@ -1947,6 +1966,7 @@ fn empty_anchor_mesh() -> Mesh {
         model_max: [0.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [0.0; 3],
+        skin_weights: None,
     }
 }
 
@@ -2591,6 +2611,45 @@ fn patch_object_parent_transform(
     }
 }
 
+/// Weighted vertex groups for a mesh's soft-skinned vertices: one group per
+/// joint, named after the joint's skeleton node so the Blender addon can bind
+/// it to that bone's scene object. Empty for meshes without skin weights.
+fn skin_vertex_groups(mesh: &Mesh, nmc: &NodeMeshCombo) -> Vec<VertexGroup> {
+    let Some(skin_weights) = mesh.skin_weights.as_ref() else {
+        return Vec::new();
+    };
+    let mut by_joint = std::collections::BTreeMap::<u16, (Vec<usize>, Vec<f32>)>::new();
+    for (vertex, bone_map) in skin_weights.iter().enumerate().take(mesh.positions.len()) {
+        for (joint, weight) in bone_map.joint_indices.iter().zip(bone_map.weights) {
+            if weight == 0 {
+                continue;
+            }
+            let (vertices, weights) = by_joint.entry(*joint).or_default();
+            let weight = f32::from(weight) / 255.0;
+            // A bone map may name the same joint in two slots; sum them.
+            if vertices.last() == Some(&vertex) {
+                if let Some(last) = weights.last_mut() {
+                    *last += weight;
+                }
+            } else {
+                vertices.push(vertex);
+                weights.push(weight);
+            }
+        }
+    }
+    by_joint
+        .into_iter()
+        .filter_map(|(joint, (vertex_indices, weights))| {
+            let node = nmc.nodes.get(joint as usize)?;
+            Some(VertexGroup {
+                name: node.name.clone(),
+                vertex_indices,
+                weights: Some(weights),
+            })
+        })
+        .collect()
+}
+
 fn remap_vertex_groups(
     vertex_groups: Option<&Vec<VertexGroup>>,
     old_to_new: &HashMap<u32, u32>,
@@ -2599,19 +2658,29 @@ fn remap_vertex_groups(
     let remapped = groups
         .iter()
         .filter_map(|group| {
-            let mut vertex_indices = group
+            let mut entries = group
                 .vertex_indices
                 .iter()
-                .filter_map(|old| old_to_new.get(&(*old as u32)).copied().map(|new| new as usize))
+                .enumerate()
+                .filter_map(|(slot, old)| {
+                    let new = old_to_new.get(&(*old as u32)).copied()? as usize;
+                    let weight = group.weights.as_ref().and_then(|weights| weights.get(slot).copied());
+                    Some((new, weight))
+                })
                 .collect::<Vec<_>>();
-            vertex_indices.sort_unstable();
-            vertex_indices.dedup();
-            if vertex_indices.is_empty() {
+            entries.sort_unstable_by_key(|(new, _)| *new);
+            entries.dedup_by_key(|(new, _)| *new);
+            if entries.is_empty() {
                 None
             } else {
+                let weights = group
+                    .weights
+                    .as_ref()
+                    .map(|_| entries.iter().map(|(_, weight)| weight.unwrap_or(1.0)).collect());
                 Some(VertexGroup {
                     name: group.name.clone(),
-                    vertex_indices,
+                    vertex_indices: entries.into_iter().map(|(new, _)| new).collect(),
+                    weights,
                 })
             }
         })
@@ -2631,6 +2700,7 @@ fn subset_mesh_for_submeshes(
     let mut normals = mesh.normals.as_ref().map(|_| Vec::new());
     let mut tangents = mesh.tangents.as_ref().map(|_| Vec::new());
     let mut colors = mesh.colors.as_ref().map(|_| Vec::new());
+    let mut skin_weights = mesh.skin_weights.as_ref().map(|_| Vec::new());
     let mut indices = Vec::new();
     let mut submeshes = Vec::new();
 
@@ -2662,6 +2732,9 @@ fn subset_mesh_for_submeshes(
                 }
                 if let (Some(src), Some(dst)) = (mesh.colors.as_ref(), colors.as_mut()) {
                     dst.push(src.get(old).copied().unwrap_or([255, 255, 255, 255]));
+                }
+                if let (Some(src), Some(dst)) = (mesh.skin_weights.as_ref(), skin_weights.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or(crate::ivo::skin::BoneMap12 { joint_indices: [0; 4], weights: [0; 4] }));
                 }
                 old_to_new.insert(old_index, new_index);
                 new_index
@@ -2720,6 +2793,7 @@ fn subset_mesh_for_submeshes(
             model_max,
             scaling_min: mesh.scaling_min,
             scaling_max: mesh.scaling_max,
+            skin_weights,
         },
         vertex_groups,
     )
@@ -3015,7 +3089,7 @@ fn write_mesh_block(
                 DECAL_OFFSET_MODIFIER_NAME,
                 0,
                 block.wn_mod_ptr,
-                0.005,
+                0.0005,
                 DECAL_OFFSET_GROUP_NAME,
                 DECAL_OFFSET_MIDLEVEL,
             ));
@@ -3066,14 +3140,16 @@ fn write_mesh_block(
         if let Some((mdv_array_ptr, mdv_data_ptr)) = block.mdeformvert_ptrs.first().copied() {
             let mut mdeformvert_data = Vec::with_capacity(block.totvert);
             let mut weight_payloads = Vec::new();
-            for vert_idx in 0..block.totvert {
-                let weights_for_vert = vgroups
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(group_idx, vgroup)| {
-                        vgroup.vertex_indices.contains(&vert_idx).then_some((group_idx as u32, 1.0f32))
-                    })
-                    .collect::<Vec<_>>();
+            let mut weights_by_vertex: Vec<Vec<(u32, f32)>> = vec![Vec::new(); block.totvert];
+            for (group_idx, vgroup) in vgroups.iter().enumerate() {
+                for (slot, vert_idx) in vgroup.vertex_indices.iter().enumerate() {
+                    let weight = vgroup.weights.as_ref().and_then(|weights| weights.get(slot).copied()).unwrap_or(1.0);
+                    if let Some(entries) = weights_by_vertex.get_mut(*vert_idx) {
+                        entries.push((group_idx as u32, weight));
+                    }
+                }
+            }
+            for (vert_idx, weights_for_vert) in weights_by_vertex.into_iter().enumerate() {
                 let weight_ptr = if weights_for_vert.is_empty() { 0 } else { block.mdeformweight_ptrs[vert_idx] };
                 mdeformvert_data.push((weight_ptr, weights_for_vert.len() as u32));
                 if !weights_for_vert.is_empty() {
@@ -3120,9 +3196,13 @@ fn mesh_to_blend_hierarchy(
         if submesh_indices.is_empty() {
             continue;
         }
-        let (node_mesh, node_vertex_groups) = subset_mesh_for_submeshes(mesh, submesh_indices, vertex_groups);
+        let (node_mesh, mut node_vertex_groups) = subset_mesh_for_submeshes(mesh, submesh_indices, vertex_groups);
         if node_mesh.indices.is_empty() {
             continue;
+        }
+        let skin_groups = skin_vertex_groups(&node_mesh, nmc);
+        if !skin_groups.is_empty() {
+            node_vertex_groups.get_or_insert_with(Vec::new).extend(skin_groups);
         }
         mesh_objects[node_index] = Some(MeshObjectExport {
             name: nmc_export_names[node_index].clone(),
@@ -3566,6 +3646,7 @@ fn create_scene_blend_package_with_instances(
         lights,
         light_projector_texture_map,
         &HashSet::new(),
+        false,
     )
 }
 
@@ -3576,6 +3657,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     lights: &[ExtractedLight],
     light_projector_texture_map: &HashMap<String, String>,
     decal_mesh_refs: &HashSet<(String, String)>,
+    separate_interior_collection: bool,
 ) -> Result<Vec<u8>, Error> {
     let children_count = mesh_instances_input.len();
     let mut used_light_names = HashMap::new();
@@ -3623,10 +3705,8 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     let root_collection_object_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
     
-    // Addon-style collections: an empty default collection, package collection,
-    // and package Interior child collection.
-    let default_collection_ptr = ptrs.alloc();
-    let default_layer_coll_ptr = ptrs.alloc();
+    // One package collection holding everything; with
+    // `separate_interior_collection` the interior goes into a child collection.
     let package_collection_ptr = ptrs.alloc();
     let package_layer_coll_ptr = ptrs.alloc();
     let interior_collection_ptr = ptrs.alloc();
@@ -3757,7 +3837,19 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         let local_object_ptr = preallocated_local_object_ptrs[idx];
         let local_object_mat_ptr = ptrs.alloc();
         let local_object_matbits_ptr = ptrs.alloc();
-        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(package_name, instance));
+        // Scene object names are de-duplicated with a `_001`/`_002` suffix, which
+        // changes the CRC32 the animation channels are keyed by. Without the
+        // authored node name only the first copy of a repeated part binds -- the
+        // Corsair's front landing gear retracts while the two tail gears keep
+        // their extended pose. Carry the name on the instance object only: its
+        // anchor is the instance's parent, so tagging both would pose the part
+        // twice.
+        let mut local_object_props = scene_instance_properties(package_name, instance);
+        local_object_props.push((
+            "starbreaker_source_node_name".to_string(),
+            IdPropValue::String(instance.source_object_name.clone()),
+        ));
+        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, local_object_props);
         let anchor_parent_ptr = instance
             .parent_node_name
             .as_ref()
@@ -3928,8 +4020,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         light_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
     }
     
-    // CollectionChild structs for the addon-style collection tree.
-    let default_coll_child_ptr = ptrs.alloc();
+    // CollectionChild structs for the collection tree.
     let package_coll_child_ptr = ptrs.alloc();
     let interior_coll_child_ptr = ptrs.alloc();
     
@@ -3960,6 +4051,11 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
             package_coll_obj_ptrs.push((*coll_obj_ptr, *empty_ptr));
         }
     }
+    if !separate_interior_collection {
+        package_coll_obj_ptrs.append(&mut interior_coll_obj_ptrs);
+    }
+    let interior_child_ptr = if separate_interior_collection { interior_coll_child_ptr } else { 0 };
+    let interior_layer_child_ptr = if separate_interior_collection { interior_layer_coll_ptr } else { 0 };
     let package_collection_head = package_coll_obj_ptrs.first().map(|entry| entry.0).unwrap_or(0);
     let package_collection_tail = package_coll_obj_ptrs.last().map(|entry| entry.0).unwrap_or(0);
     let interior_collection_head = interior_coll_obj_ptrs.first().map(|entry| entry.0).unwrap_or(0);
@@ -3970,16 +4066,15 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     let root_collection_data = build_master_collection(
         0,
         0,
-        default_coll_child_ptr,
+        package_coll_child_ptr,
         package_coll_child_ptr,
     );
-    let default_collection_data = build_collection("Collection", 0, 0, 0, 0);
     let package_collection_data = build_collection(
         &format!("StarBreaker {package_name}"),
         package_collection_head,
         package_collection_tail,
-        interior_coll_child_ptr,
-        interior_coll_child_ptr,
+        interior_child_ptr,
+        interior_child_ptr,
     );
     let interior_collection_data = build_collection(
         &format!("StarBreaker {package_name} Interior"),
@@ -3988,13 +4083,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         0,
         0,
     );
-    let default_coll_child_data =
-        build_collection_object_linked(default_collection_ptr, 0, package_coll_child_ptr);
-    let package_coll_child_data = build_collection_object_linked(
-        package_collection_ptr,
-        default_coll_child_ptr,
-        0,
-    );
+    let package_coll_child_data = build_collection_object_linked(package_collection_ptr, 0, 0);
     let interior_coll_child_data =
         build_collection_object_linked(interior_collection_ptr, 0, 0);
 
@@ -4002,22 +4091,15 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         root_collection_ptr,  // Collection pointer
         0,                    // prev = NULL (root has no siblings)
         0,                    // next = NULL (root has no siblings)
-        default_layer_coll_ptr,
         package_layer_coll_ptr,
-    );
-    let default_layer_coll_data = build_layer_collection_linked(
-        default_collection_ptr,
-        0,
         package_layer_coll_ptr,
-        0,
-        0,
     );
     let package_layer_coll_data = build_layer_collection_linked(
         package_collection_ptr,
-        default_layer_coll_ptr,
         0,
-        interior_layer_coll_ptr,
-        interior_layer_coll_ptr,
+        0,
+        interior_layer_child_ptr,
+        interior_layer_child_ptr,
     );
     let interior_layer_coll_data = build_layer_collection_linked(
         interior_collection_ptr,
@@ -4345,25 +4427,26 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &root_layer_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, default_layer_coll_ptr, 1, &default_layer_coll_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, package_layer_coll_ptr, 1, &package_layer_coll_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, interior_layer_coll_ptr, 1, &interior_layer_coll_data);
+    if separate_interior_collection {
+        write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, interior_layer_coll_ptr, 1, &interior_layer_coll_data);
+    }
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);  // embedded master_collection
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, default_coll_child_ptr, 1, &default_coll_child_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, package_coll_child_ptr, 1, &package_coll_child_data);
     // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
 
 
-    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, default_collection_ptr, 1, &default_collection_data);
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, package_collection_ptr, 1, &package_collection_data);
     for (coll_obj_ptr, coll_obj_data) in &package_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, interior_coll_child_ptr, 1, &interior_coll_child_data);
-    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, interior_collection_ptr, 1, &interior_collection_data);
-    for (coll_obj_ptr, coll_obj_data) in &interior_coll_obj_data_list {
-        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+    if separate_interior_collection {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, interior_coll_child_ptr, 1, &interior_coll_child_data);
+        write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, interior_collection_ptr, 1, &interior_collection_data);
+        for (coll_obj_ptr, coll_obj_data) in &interior_coll_obj_data_list {
+            write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+        }
     }
 
     // Write package/entity root empty objects + properties/material arrays.
@@ -5854,6 +5937,8 @@ pub struct VertexGroup {
     pub name: String,
     /// Indices of vertices in the group
     pub vertex_indices: Vec<usize>,
+    /// Weight per entry of `vertex_indices`; `None` means every weight is 1.0.
+    pub weights: Option<Vec<f32>>,
 }
 
 /// Mesh with vertex groups ready to write
@@ -5930,6 +6015,7 @@ pub fn collect_decal_vertices(
     let decal_vgroup = VertexGroup {
         name: DECAL_OFFSET_GROUP_NAME.to_string(),
         vertex_indices,
+        weights: None,
     };
     
     // Fix Phase 4B bug: total_vertices should be max(corner_verts) + 1, not len(corner_verts)

@@ -1061,6 +1061,8 @@ pub struct ExportRequest {
     pub include_animations: bool,
     #[serde(default)]
     pub include_object_type_directory: bool,
+    #[serde(default)]
+    pub separate_interior_collection: bool,
 }
 
 #[derive(Clone)]
@@ -1543,6 +1545,7 @@ pub async fn start_export(
         apply_default_animation_pose: !request.include_animations,
         default_animation_tags: vec!["landing_gear_extend".to_string()],
         decomposed_package_subdir: None,
+        separate_interior_collection: request.separate_interior_collection,
     };
 
     log::info!(

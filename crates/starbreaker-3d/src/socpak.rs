@@ -200,6 +200,9 @@ pub fn load_interior_from_socpak(
     let mut meshes = Vec::new();
     let mut lights = Vec::new();
     let mut tint_palette_names = Vec::new();
+    // Root item ports whose content a .soc entity is attached to
+    // (`TileAttachmentParams`), keyed by the entity instance the port names.
+    let mut attached_item_ports = AttachedItemPorts::new();
 
     for soc_entry in &soc_entries {
         let soc_data = match inner.read(soc_entry) {
@@ -211,7 +214,10 @@ pub fn load_interior_from_socpak(
         };
 
         match parse_soc(&soc_data, &soc_entry.name, container_transform) {
-            Ok((payload, palette_names)) => {
+            Ok((payload, palette_names, attachments)) => {
+                attached_item_ports.extend(attachments.into_iter().map(|(name, transform)| {
+                    (name, transform_with_delta(transform, non_item_port_transform_delta))
+                }));
                 log::debug!(
                     "  .soc '{}' → {} meshes, {} lights",
                     soc_entry.name,
@@ -245,6 +251,7 @@ pub fn load_interior_from_socpak(
         &name,
         container_transform,
         root_item_port_reference_candidates,
+        &attached_item_ports,
     ));
 
     Ok(InteriorPayload {
@@ -267,12 +274,13 @@ fn normalize_socpak_path(path: &str) -> String {
     }
 }
 
-/// Parse a .soc file's CrCh chunks. Returns meshes/lights + tint palette names.
+/// Parse a .soc file's CrCh chunks. Returns meshes/lights, tint palette names
+/// and the item-port attachments of its entities.
 fn parse_soc(
     data: &[u8],
     name: &str,
     container_transform: [[f32; 4]; 4],
-) -> Result<(InteriorPayload, Vec<String>), Error> {
+) -> Result<(InteriorPayload, Vec<String>, AttachedItemPorts), Error> {
     let cf =
         ChunkFile::from_bytes(data).map_err(|e| Error::ChunkParse(format!("{name}.soc: {e}")))?;
 
@@ -285,6 +293,7 @@ fn parse_soc(
     let mut meshes = Vec::new();
     let mut lights = Vec::new();
     let mut palette_names = Vec::new();
+    let mut attachments = AttachedItemPorts::new();
 
     for chunk in crch_file.chunks() {
         let chunk_data = crch_file.chunk_data(chunk);
@@ -304,6 +313,7 @@ fn parse_soc(
                     let (entity_meshes, entity_lights) = extract_cryxml_entities(&xml);
                     meshes.extend(entity_meshes);
                     lights.extend(entity_lights);
+                    collect_item_port_attachments(&xml, &mut attachments);
                 }
                 Err(e) => log::warn!("failed to parse CryXMLB in {name}: {e}"),
             },
@@ -319,7 +329,56 @@ fn parse_soc(
         lights,
         container_transform,
         tint_palette_names: Vec::new(), // Set by caller from palette_names
-    }, palette_names))
+    }, palette_names, attachments))
+}
+
+/// Root item port (by lowercased entity instance name) -> container-space
+/// transform of the .soc entity attached to it.
+type AttachedItemPorts = HashMap<String, [[f32; 4]; 4]>;
+
+/// Item-port attachments of the top-level .soc entities.
+///
+/// An entity with `<TileAttachmentParams ItemPortName="Port62_X-016[...]">` is
+/// the authored instance of that root item port: its `Pos`/`Rotate` place the
+/// port's content, while the port's `interactionOffset` only marks where it is
+/// used. Placing the port through that offset left the Star Runner's door
+/// screens 4 m above their panels and unrotated.
+fn collect_item_port_attachments(xml: &CryXml, out: &mut AttachedItemPorts) {
+    let root = xml.root();
+    let container = xml
+        .node_children(root)
+        .find(|child| matches!(xml.node_tag(child), "Entities" | "SCOC_Entities"))
+        .or_else(|| matches!(xml.node_tag(root), "Entities" | "SCOC_Entities").then_some(root));
+    let Some(container) = container else {
+        return;
+    };
+    for entity in xml.node_children(container) {
+        if xml.node_tag(entity) != "Entity" {
+            continue;
+        }
+        let Some(port_name) = xml
+            .node_children(entity)
+            .filter(|child| xml.node_tag(child) == "TileAttachmentParams")
+            .find_map(|child| xml.node_attributes(child).find(|(key, _)| *key == "ItemPortName").map(|(_, value)| value))
+        else {
+            continue;
+        };
+        let Some(instance) = item_port_entity_instance_name(port_name) else {
+            continue;
+        };
+        let attrs: HashMap<&str, &str> = xml.node_attributes(entity).collect();
+        let pos = parse_csv_f64(attrs.get("Pos").copied().unwrap_or("0,0,0"));
+        let rot = parse_csv_f64(attrs.get("Rotate").copied().unwrap_or("1,0,0,0"));
+        let scale = parse_csv_f64(attrs.get("Scale").copied().unwrap_or("1,1,1"));
+        out.insert(instance.to_ascii_lowercase(), pos_rot_scale_to_4x4(&pos, &rot, &scale));
+    }
+}
+
+/// The same `delta * transform` that `transform_non_item_port_mesh` applies,
+/// so an attached port lands bit-identically on its entity's own mesh and the
+/// placement de-duplication collapses the two.
+fn transform_with_delta(transform: [[f32; 4]; 4], delta: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    (glam::Mat4::from_cols_array_2d(&delta) * glam::Mat4::from_cols_array_2d(&transform)).to_cols_array_2d()
 }
 
 fn transform_non_item_port_mesh(
@@ -380,6 +439,7 @@ fn extract_root_item_port_meshes(
     root_name: &str,
     container_transform: [[f32; 4]; 4],
     root_item_port_reference_candidates: &[[[f32; 4]; 4]],
+    attached: &AttachedItemPorts,
 ) -> Vec<InteriorMesh> {
     let root_xml_name = format!("{}.xml", root_name.to_ascii_lowercase());
     let Some(entry) = inner.entries().iter().find(|entry| {
@@ -407,6 +467,7 @@ fn extract_root_item_port_meshes(
         &data,
         container_transform,
         root_item_port_reference_transform,
+        attached,
     );
     let kept = filter_item_port_meshes_to_editor_bounds(meshes, root_bounds);
     if !kept.is_empty() {
@@ -423,22 +484,25 @@ fn extract_item_port_meshes_from_container_xml(
     data: &[u8],
     container_transform: [[f32; 4]; 4],
     root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+    attached: &AttachedItemPorts,
 ) -> Vec<InteriorMesh> {
     if let Ok(xml) = starbreaker_cryxml::from_bytes(data) {
         return extract_item_port_meshes_from_cryxml(
             &xml,
             container_transform,
             root_item_port_reference_transform,
+            attached,
         );
     }
 
     let Ok(text) = std::str::from_utf8(data) else {
         return Vec::new();
     };
-    extract_item_port_meshes_from_text_xml(
+    extract_item_port_meshes_from_text_xml_attached(
         text,
         container_transform,
         root_item_port_reference_transform,
+        attached,
     )
 }
 
@@ -446,12 +510,14 @@ fn extract_item_port_meshes_from_cryxml(
     xml: &CryXml,
     container_transform: [[f32; 4]; 4],
     root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+    attached: &AttachedItemPorts,
 ) -> Vec<InteriorMesh> {
     fn walk(
         xml: &CryXml,
         node: &starbreaker_cryxml::CryXmlNode,
         container_transform: [[f32; 4]; 4],
         root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+        attached: &AttachedItemPorts,
         meshes: &mut Vec<InteriorMesh>,
     ) {
         if xml.node_tag(node) == "ItemPort" {
@@ -460,6 +526,7 @@ fn extract_item_port_meshes_from_cryxml(
                 &attrs,
                 container_transform,
                 root_item_port_reference_transform,
+                attached,
                 meshes,
             );
         }
@@ -469,6 +536,7 @@ fn extract_item_port_meshes_from_cryxml(
                 child,
                 container_transform,
                 root_item_port_reference_transform,
+                attached,
                 meshes,
             );
         }
@@ -480,15 +548,31 @@ fn extract_item_port_meshes_from_cryxml(
         xml.root(),
         container_transform,
         root_item_port_reference_transform,
+        attached,
         &mut meshes,
     );
     meshes
 }
 
+#[cfg(test)]
 fn extract_item_port_meshes_from_text_xml(
     text: &str,
     container_transform: [[f32; 4]; 4],
     root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+) -> Vec<InteriorMesh> {
+    extract_item_port_meshes_from_text_xml_attached(
+        text,
+        container_transform,
+        root_item_port_reference_transform,
+        &AttachedItemPorts::new(),
+    )
+}
+
+fn extract_item_port_meshes_from_text_xml_attached(
+    text: &str,
+    container_transform: [[f32; 4]; 4],
+    root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+    attached: &AttachedItemPorts,
 ) -> Vec<InteriorMesh> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(true);
@@ -513,6 +597,7 @@ fn extract_item_port_meshes_from_text_xml(
                     &borrowed,
                     container_transform,
                     root_item_port_reference_transform,
+                    attached,
                     &mut meshes,
                 );
             }
@@ -533,8 +618,14 @@ fn push_item_port_mesh(
     attrs: &HashMap<&str, &str>,
     container_transform: [[f32; 4]; 4],
     root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+    attached: &AttachedItemPorts,
     meshes: &mut Vec<InteriorMesh>,
 ) {
+    let attached_transform = attrs
+        .get("name")
+        .and_then(|value| item_port_entity_instance_name(value))
+        .and_then(|instance| attached.get(&instance.to_ascii_lowercase()))
+        .copied();
     let Some(entity_class_name) = attrs
         .get("name")
         .and_then(|value| normalize_item_port_entity_name(value))
@@ -551,13 +642,19 @@ fn push_item_port_mesh(
     let rot = parse_csv_f64(attrs.get("rotation").copied().unwrap_or("1,0,0,0"));
     let scale = [1.0, 1.0, 1.0];
     let world_transform = glam::Mat4::from_cols_array_2d(&pos_rot_scale_to_4x4(&pos, &rot, &scale));
-    let reference_transform = if attrs.get("resourceLinkToParent").copied() == Some("1") {
-        root_item_port_reference_transform.unwrap_or(container_transform)
-    } else {
-        container_transform
-    };
+    // `resourceLinkToParent` describes resource linkage, not the space the
+    // offset is authored in — the Corsair's tail container has `Port0` (link=1)
+    // and `Port3` (link=0) sharing one `interactionOffset`. Every ItemPort in a
+    // root container XML is authored against the root entity, so all of them
+    // convert through the root reference when one was resolved. Treating the
+    // unlinked ones as container-space left them carrying the container's own
+    // bone offset twice: the Corsair's ramp door panels ended up 16.5m behind
+    // the hull. `container_transform` is only correct when no root reference
+    // exists.
+    let reference_transform = root_item_port_reference_transform.unwrap_or(container_transform);
     let reference_transform = glam::Mat4::from_cols_array_2d(&reference_transform);
-    let transform = (reference_transform.inverse() * world_transform).to_cols_array_2d();
+    let transform = attached_transform
+        .unwrap_or_else(|| (reference_transform.inverse() * world_transform).to_cols_array_2d());
     meshes.push(InteriorMesh {
         cgf_path: String::new(),
         material_path: None,
@@ -565,6 +662,16 @@ fn push_item_port_mesh(
         entity_class_guid: None,
         entity_class_name: Some(entity_class_name),
     });
+}
+
+/// Entity instance an item port names: `Port4_Name-001[layer]` -> `Name-001`.
+fn item_port_entity_instance_name(port_name: &str) -> Option<&str> {
+    let rest = port_name.strip_prefix("Port").and_then(|rest| {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        (digit_count > 0 && rest.get(digit_count..digit_count + 1) == Some("_")).then(|| &rest[digit_count + 1..])
+    })?;
+    let instance = rest.split('[').next()?.trim();
+    (!instance.is_empty()).then_some(instance)
 }
 
 fn normalize_item_port_entity_name(port_name: &str) -> Option<String> {
@@ -614,6 +721,7 @@ fn infer_root_item_port_reference_transform(
         root_xml_data,
         glam::Mat4::IDENTITY.to_cols_array_2d(),
         None,
+        &AttachedItemPorts::new(),
     );
     if item_ports.is_empty() {
         return root_item_port_reference_candidates.first().copied();
@@ -1742,6 +1850,51 @@ mod tests {
         assert!((meshes[0].transform[3][2] - 3.61601).abs() < 1e-6);
     }
 
+    /// Star Runner `base_int_body_main.xml` lists a root item port for every
+    /// door-control screen whose entity the main `.soc` already places. The
+    /// port copy came out 4 m higher and unrotated, so the screens floated.
+    #[test]
+    fn root_item_ports_take_the_placement_of_their_attached_entity() {
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort name="Port1_ControlPanel_Screen_DoorControl_9x16_Small-004[cargo_hold]"
+                    interactionOffset="-4.1467528,-7.0175171,3.2958319" />
+                  <ItemPort name="Port0_ChipSet_LightControl-000[cargo_hold]"
+                    interactionOffset="-3.074193,-16.26973,4.9682541" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+        let entity_transform = super::pos_rot_scale_to_4x4(
+            &[-6.1467528, 0.23, 1.046],
+            &[0.99254608, 0.0, 0.0, -0.12187001],
+            &[1.0, 1.0, 1.0],
+        );
+        let attached: super::AttachedItemPorts =
+            [("controlpanel_screen_doorcontrol_9x16_small-004".to_string(), entity_transform)].into_iter().collect();
+
+        let meshes = super::extract_item_port_meshes_from_text_xml_attached(
+            xml,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            None,
+            &attached,
+        );
+        assert_eq!(meshes.len(), 2);
+        assert_eq!(meshes[0].transform, entity_transform, "attached port uses its entity's placement");
+        assert!((meshes[1].transform[3][2] - 4.9682541).abs() < 1e-6, "unattached port keeps its offset");
+    }
+
+    #[test]
+    fn item_port_entity_instance_name_keeps_the_instance_suffix() {
+        assert_eq!(
+            super::item_port_entity_instance_name("Port12_ControlPanel_LightSwitch_CRUS-015[scanning]"),
+            Some("ControlPanel_LightSwitch_CRUS-015")
+        );
+        assert_eq!(super::item_port_entity_instance_name("Port3_[x]"), None);
+    }
+
     #[test]
     fn extract_item_port_meshes_from_text_xml_localizes_against_current_container_transform() {
         let xml = r#"
@@ -1793,6 +1946,37 @@ mod tests {
         assert!((meshes[0].transform[3][0] - 7.625).abs() < 1e-6);
         assert!((meshes[0].transform[3][1] + 25.656252).abs() < 1e-6);
         assert!((meshes[0].transform[3][2] - 3.6906581).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_item_port_meshes_from_text_xml_uses_reference_transform_for_unlinked_ports() {
+        // `resourceLinkToParent="0"` does not mean "authored in container space":
+        // the Corsair's ramp door panels are unlinked yet still relative to the
+        // root, and using the container transform left them offset by the
+        // container's bone translation.
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port5_ControlPanel_Screen_DoorControl_Physical_Corsair_Ramp_Int_Left[int_hold_SETUP]"
+                    interactionOffset="4.2099118,-20.362814,-0.25136301"
+                    rotation="1,0,0,0"
+                    resourceLinkToParent="0" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            Some(build_container_transform([0.0, -16.5, 0.0], [0.0, 0.0, 0.0])),
+        );
+        assert_eq!(meshes.len(), 1);
+        assert!((meshes[0].transform[3][0] - 4.2099118).abs() < 1e-5);
+        assert!((meshes[0].transform[3][1] - -3.862814).abs() < 1e-5);
+        assert!((meshes[0].transform[3][2] - -0.25136301).abs() < 1e-5);
     }
 
     #[test]

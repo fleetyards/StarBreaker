@@ -1021,6 +1021,44 @@ class PackageOpsTests(unittest.TestCase):
             (0.25, 0.5, 0.75, 1.0),
         )
 
+    def test_shared_glow_control_caches_empty_result(self) -> None:
+        """A package with no glow targets must not re-scan on every call.
+
+        The tools panel asks this from `draw()`, so an uncached negative answer
+        re-walked every object and re-parsed each material sidecar on every
+        redraw, stalling the viewport.
+        """
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(submaterials=[])
+        loads: list[str] = []
+
+        def _load_sidecar(path: str):
+            loads.append(path)
+            return sidecar
+
+        package = types.SimpleNamespace(load_material_sidecar=_load_sidecar)
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            first = self.package_ops.shared_glow_control_enabled(package_root)
+            scans_after_first = len(loads)
+            second = self.package_ops.shared_glow_control_enabled(package_root)
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+        self.assertFalse(first)
+        self.assertFalse(second)
+        self.assertEqual(len(loads), scans_after_first, "second call re-scanned the package")
+        payload = json.loads(package_root["starbreaker_shared_glow_control"])
+        self.assertEqual(payload["targets"], [])
+
     def test_shared_glow_control_enabled_discovers_mesh_decal_glow_targets(self) -> None:
         package_root = FakeObject("Root", starbreaker_package_root=True)
         mesh = FakeObject(
@@ -1457,6 +1495,85 @@ class AnimationDisplayNameTests(unittest.TestCase):
             clip,
         )
         self.assertEqual(label, "Wings Deploy")
+
+    @staticmethod
+    def _landing_gear_package() -> types.SimpleNamespace:
+        """Constellation-style Landing_Gear: one Mannequin option per scope.
+
+        The ``Landing_Gear``-tagged option drives the gear legs, the untagged
+        one swings the nacelle that carries them. CryEngine plays both for a
+        single ``Retract`` request.
+        """
+
+        def fragment(tags, frag_tags, scopes, speed=None):
+            animation = {"name": "x"}
+            if speed is not None:
+                animation["speed"] = speed
+            return {"fragment": "Landing_Gear", "tags": tags, "frag_tags": frag_tags,
+                    "scopes": scopes, "animations": [animation]}
+
+        legs = {
+            "name": "landing_gear_deploy", "fps": 30, "frame_count": 139,
+            "bones": {"0xA": {"rotation": [[1, 0, 0, 0]]}},
+            "fragments": [
+                fragment(["Landing_Gear"], ["Deploy"], ["LG1", "LG2"]),
+                fragment(["Landing_Gear"], ["Retract"], ["LG1", "LG2"], speed=-1.0),
+            ],
+        }
+        nacelle = {
+            "name": "nacelle_bottom_deploy.caf", "fps": 30, "frame_count": 139,
+            "bones": {"0xB": {"rotation": [[1, 0, 0, 0]]}},
+            "fragments": [
+                fragment([], ["Deploy"], []),
+                fragment([], ["Retract"], [], speed=-1.0),
+            ],
+        }
+        compress = {
+            "name": "landing_gear_compress", "fps": 30, "frame_count": 50,
+            "bones": {"0xA": {"rotation": [[1, 0, 0, 0]]}},
+            "fragments": [fragment(["Landing_Gear"], ["Compress"], ["LG1", "LG2"])],
+        }
+        return types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(
+                    entity_name="EntityClassDefinition.Test_Ship",
+                    raw={"animations": [legs, nacelle, compress]},
+                )
+            )
+        )
+
+    def test_fragment_selection_plays_every_scope_option_of_the_fragment(self) -> None:
+        package = self._landing_gear_package()
+        item_map = dict(self.package_ops.available_package_animation_items(package))
+        self.assertEqual(item_map.get("fragment:1:landing_gear_deploy"), "Landing Gear Retract")
+
+        clip, fragment = self.package_ops._find_animation_selection(
+            package, "fragment:1:landing_gear_deploy"
+        )
+        self.assertEqual(set(clip["bones"]), {"0xA", "0xB"})
+        self.assertEqual(fragment["frag_tags"], ["Retract"])
+        self.assertTrue(self.package_ops._effective_fragment_reverse_playback(fragment))
+
+    def test_fragment_selection_leaves_the_package_clips_untouched(self) -> None:
+        package = self._landing_gear_package()
+        self.package_ops._find_animation_selection(package, "fragment:1:landing_gear_deploy")
+        legs = package.scene.root_entity.raw["animations"][0]
+        self.assertEqual(set(legs["bones"]), {"0xA"})
+
+    def test_fragment_selection_skips_options_driving_the_same_bones(self) -> None:
+        package = self._landing_gear_package()
+        clips = package.scene.root_entity.raw["animations"]
+        clips[1]["bones"] = {"0xA": {"rotation": [[0, 1, 0, 0]]}}
+        clip, _ = self.package_ops._find_animation_selection(
+            package, "fragment:1:landing_gear_deploy"
+        )
+        self.assertEqual(clip["bones"], {"0xA": {"rotation": [[1, 0, 0, 0]]}})
+
+    def test_bare_clip_selection_is_not_combined(self) -> None:
+        package = self._landing_gear_package()
+        clip, fragment = self.package_ops._find_animation_selection(package, "landing_gear_deploy")
+        self.assertEqual(set(clip["bones"]), {"0xA"})
+        self.assertIsNone(fragment)
 
     def test_animation_insert_label_falls_back_to_animation_key(self) -> None:
         clip = {"name": "test_ship_vtol_deploy", "fragments": []}

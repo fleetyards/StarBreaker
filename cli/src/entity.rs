@@ -53,7 +53,20 @@ fn sanitize_export_name(name: &str) -> String {
     }
 }
 
-fn prepare_decomposed_output_root(output_root: &PathBuf, package_name: &str) -> Result<()> {
+/// Path of the package folder relative to `Packages/`.
+///
+/// The decomposed exporter names the folder `<name>_LOD<n>_TEX<n>` and, when a
+/// package subdir is configured, nests it under that object-type folder. Both
+/// halves have to match or the CLI cleans and verifies the wrong directory.
+fn decomposed_package_rel_path(export_name: &str, opts: &starbreaker_3d::ExportOptions) -> PathBuf {
+    let package_name = format!("{export_name}_LOD{}_TEX{}", opts.lod_level, opts.texture_mip);
+    match opts.decomposed_package_subdir.as_deref() {
+        Some(subdir) => Path::new(subdir).join(package_name),
+        None => PathBuf::from(package_name),
+    }
+}
+
+fn prepare_decomposed_output_root(output_root: &PathBuf, package_name: &Path) -> Result<()> {
     if output_root.exists() {
         if output_root.is_file() {
             return Err(CliError::InvalidInput(format!(
@@ -555,13 +568,9 @@ fn export(
                 CliError::InvalidInput("entity export returned no decomposed files".into())
             })?;
             eprintln!("Decomposed export file count: {}", decomposed.files.len());
-            // The decomposed exporter names its package folder with a
-            // `_LOD<n>_TEX<n>` suffix. Use that exact name here so we clean
+            // Use the exporter's own folder name (and subdir) here so we clean
             // the right directory and don't leave an empty sibling folder.
-            let package_name = format!(
-                "{export_name}_LOD{}_TEX{}",
-                export_opts.lod_level, export_opts.texture_mip
-            );
+            let package_name = decomposed_package_rel_path(&export_name, &export_opts);
             prepare_decomposed_output_root(&output, &package_name)?;
             for file in &decomposed.files {
                 let output_path = output.join(&file.relative_path);
@@ -619,10 +628,7 @@ fn export_blend(
         export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
 
         let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
-        let package_name = format!(
-            "{export_name}_LOD{}_TEX{}",
-            export_opts.lod_level, export_opts.texture_mip
-        );
+        let package_name = decomposed_package_rel_path(&export_name, &export_opts);
 
         let existing_asset_paths = if opts.skip_existing_assets {
             Some(collect_existing_decomposed_assets(&output_dir, &p4k)?)

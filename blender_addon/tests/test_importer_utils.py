@@ -63,7 +63,11 @@ for _pkg in ("starbreaker_addon", "starbreaker_addon.runtime", "starbreaker_addo
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.material_contract import ContractInput, ShaderGroupContract
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
-from starbreaker_addon.runtime.record_utils import _mesh_decal_authored_emission_strength
+from starbreaker_addon.runtime.record_utils import (
+    _emissive_opacity_factor,
+    _mesh_decal_authored_emission_strength,
+    _mesh_decal_diffuse_multipliers,
+)
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_source_name,
     _material_identity,
@@ -331,6 +335,77 @@ class TestMeshDecalEmissionStrength(unittest.TestCase):
             ),
             1.0,
         )
+
+
+class TestEmissiveOpacityFactor(unittest.TestCase):
+    def test_zero_emissive_opacity_suppresses_authored_emissive(self) -> None:
+        # Constellation Mk5 interior bridge glass: orange Emissive, never shown.
+        glass = SubmaterialRecord.from_value(
+            {
+                "shader_family": "GlassPBR",
+                "authored_attributes": [{"name": "Emissive", "value": "1,0.13286835,0"}],
+                "public_params": {"EmissiveOpacity": 0},
+            }
+        )
+        self.assertEqual(_emissive_opacity_factor(glass), 0.0)
+
+    def test_partial_emissive_opacity_scales_emission(self) -> None:
+        screen = SubmaterialRecord.from_value(
+            {"shader_family": "DisplayScreen", "public_params": {"EmissiveOpacity": "0.4"}}
+        )
+        self.assertAlmostEqual(_emissive_opacity_factor(screen), 0.4)
+
+    def test_materials_without_the_param_emit_unscaled(self) -> None:
+        hull = SubmaterialRecord.from_value(
+            {"shader_family": "Illum", "authored_attributes": [{"name": "Emissive", "value": "1,1,1"}]}
+        )
+        self.assertEqual(_emissive_opacity_factor(hull), 1.0)
+
+
+def _mesh_decal(string_gen_mask: str, **attributes: str) -> SubmaterialRecord:
+    authored = [{"name": "StringGenMask", "value": string_gen_mask}]
+    authored.extend({"name": name, "value": value} for name, value in attributes.items())
+    return SubmaterialRecord.from_value({"shader_family": "MeshDecal", "authored_attributes": authored})
+
+
+class TestMeshDecalDiffuseMultipliers(unittest.TestCase):
+    def test_diffuse_decal_applies_authored_colour_and_opacity(self) -> None:
+        # Star Runner Ext_Dirt_Decals: a faint near-black grime streak whose
+        # blue vertex colours showed at full strength without these factors.
+        dirt = _mesh_decal(
+            "%DIFFUSE_MAP%VERTCOLORS%USE_DAMAGE_MAP",
+            Diffuse="0.023153368,0.023153368,0.023153368",
+            Opacity="0.17",
+        )
+        colour, opacity = _mesh_decal_diffuse_multipliers(dirt)
+        self.assertEqual(tuple(round(c, 4) for c in colour), (0.0232, 0.0232, 0.0232))
+        self.assertAlmostEqual(opacity, 0.17)
+
+    def test_neutral_authoring_needs_no_multipliers(self) -> None:
+        plain = _mesh_decal("%DIFFUSE_MAP", Diffuse="1,1,1", Opacity="1")
+        self.assertEqual(_mesh_decal_diffuse_multipliers(plain), (None, None))
+
+    def test_stencil_decals_keep_their_palette_tint(self) -> None:
+        stencil = _mesh_decal("%VERTCOLORS%STENCIL_MAP", Diffuse="0.023,0.023,0.023", Opacity="0.74")
+        self.assertEqual(_mesh_decal_diffuse_multipliers(stencil), (None, None))
+
+    def test_alpha_tested_decals_ignore_blend_opacity(self) -> None:
+        tested = _mesh_decal("%DIFFUSE_MAP%DISABLE_ALPHA_BLEND", Diffuse="0.5,0.5,0.5", Opacity="0.3")
+        colour, opacity = _mesh_decal_diffuse_multipliers(tested)
+        self.assertEqual(colour, (0.5, 0.5, 0.5))
+        self.assertIsNone(opacity)
+
+    def test_other_shader_families_are_untouched(self) -> None:
+        hull = SubmaterialRecord.from_value(
+            {
+                "shader_family": "HardSurface",
+                "authored_attributes": [
+                    {"name": "StringGenMask", "value": "%DIFFUSE_MAP"},
+                    {"name": "Diffuse", "value": "0.5,0.5,0.5"},
+                ],
+            }
+        )
+        self.assertEqual(_mesh_decal_diffuse_multipliers(hull), (None, None))
 
 
 class TestMaterialAlphaSources(unittest.TestCase):

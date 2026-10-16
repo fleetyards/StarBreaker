@@ -68,6 +68,20 @@ pub(crate) fn flatten_resolved_tree(
     ));
 }
 
+/// Return each loadout entity that owns a scene node and may define vehicle landing gear.
+/// Synthetic vehicle XML parts reuse their parent's DataCore record, so they are
+/// excluded via `allows_child_object_containers` to avoid duplicating the root gear.
+pub(crate) fn collect_landing_gear_owners(
+    nodes: &[crate::types::ResolvedNode],
+    out: &mut Vec<(Record, String)>,
+) {
+    for node in nodes {
+        if node.allows_child_object_containers && (node.has_geometry || node.nmc.is_some()) {
+            out.push((node.record, node.entity_name.clone()));
+        }
+        collect_landing_gear_owners(&node.children, out);
+    }
+}
 // ── Shared loadout resolution ────────────────────────────────────────────────
 
 /// Resolve an entire loadout tree into a lightweight metadata tree.

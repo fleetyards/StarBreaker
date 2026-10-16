@@ -36,6 +36,7 @@ export function Sidebar() {
   const [version, setVersion] = useState<AppVersion | null>(null);
 
   const fileName = p4kPath?.split(/[/\\]/).pop() ?? null;
+  const [versionNumber, buildId] = version?.version.split("+", 2) ?? [];
 
   useEffect(() => {
     getAppVersion().then(setVersion).catch(console.error);
@@ -77,9 +78,12 @@ export function Sidebar() {
       </nav>
 
       {version && (
-        <div className="px-3 py-2 border-t border-border">
-          <p className="text-[11px] text-text-dim font-mono">
-            {version.version}
+        <div className="px-3 py-2 border-t border-border" title={version.version}>
+          <p className="text-xs font-medium text-text-sub">
+            v{versionNumber}
+          </p>
+          <p className="text-[10px] text-text-dim font-mono" title={version.version}>
+            build {buildId ?? "unknown"}
           </p>
         </div>
       )}

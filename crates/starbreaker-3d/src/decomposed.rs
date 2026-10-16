@@ -32,6 +32,10 @@ pub(crate) struct DecomposedInput {
     pub root_skeleton_source_path: Option<String>,
     pub root_animation_controller: Option<crate::animation::AnimationControllerSource>,
     pub children: Vec<EntityPayload>,
+    /// Loadout entities other than the root that define their own landing
+    /// gear, i.e. vehicles carried by the root. Their clips are exported in
+    /// a separate namespace (see `child_animation_owner`).
+    pub nested_vehicle_names: HashSet<String>,
     pub interiors: LoadedInteriors,
     /// All available paint variants for this entity, populated from SubGeometry entries.
     pub paint_variants: Vec<crate::mtl::PaintVariant>,
@@ -135,6 +139,7 @@ fn empty_scene_graph_mesh() -> Mesh {
         model_max: [0.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [0.0; 3],
+        skin_weights: None,
     }
 }
 
@@ -215,16 +220,21 @@ fn docking_host_world_matrix(
         .map(|(index, _)| builder.compute_node_world_matrix(index))
 }
 
+/// Model-space translation of the first NMC node whose name matches. NMC
+/// transforms are parent-relative, so the parent chain is composed.
+fn nmc_node_model_translation(nmc: &NodeMeshCombo, matches: impl Fn(&str) -> bool) -> Option<glam::Vec3> {
+    let index = nmc.nodes.iter().position(|node| matches(&node.name))?;
+    let world = crate::pipeline::compute_nmc_world_transforms(nmc);
+    Some(world.get(index)?.w_axis.truncate())
+}
+
 fn child_docking_vehicle_translation(nmc: Option<&NodeMeshCombo>) -> Option<glam::Vec3> {
-    nmc?.nodes.iter().find_map(|node| {
-        node.name.to_ascii_lowercase().contains("docking_vehicle").then(|| {
-            glam::Vec3::new(
-                node.bone_to_world[0][3],
-                node.bone_to_world[1][3],
-                node.bone_to_world[2][3],
-            )
-        })
-    })
+    nmc_node_model_translation(nmc?, |name| name.to_ascii_lowercase().contains("docking_vehicle"))
+}
+
+fn child_docking_collar_translation(child: &crate::types::EntityPayload) -> Option<glam::Vec3> {
+    let port = child.docking_collar_port.as_deref()?;
+    nmc_node_model_translation(child.nmc.as_ref()?, |name| name.eq_ignore_ascii_case(port))
 }
 
 fn docking_entity_attachment_offset(
@@ -232,8 +242,11 @@ fn docking_entity_attachment_offset(
     target_idx: usize,
     child: &crate::types::EntityPayload,
 ) -> Option<glam::Vec3> {
-    // Vehicle docking entity attachments align the child vehicle attach helper
-    // to a sibling docking host/door helper, not to the item-port node origin.
+    // A docked vehicle is not placed by its origin. A docking module (the
+    // Drake command module) aligns its `docking_vehicle` helper to a sibling
+    // docking host/door helper; a snub (the Merlin, the Skylark) has no such
+    // helper and instead mates the port holding its own docking collar to the
+    // host port it hangs on.
     if !child
         .port_flags
         .split_whitespace()
@@ -242,12 +255,23 @@ fn docking_entity_attachment_offset(
         return None;
     }
     let target_world = glam::Mat4::from_cols_array(&builder.compute_node_world_matrix(target_idx));
-    let host_world = glam::Mat4::from_cols_array(&docking_host_world_matrix(builder, target_idx)?);
-    let child_attach = child_docking_vehicle_translation(child.nmc.as_ref())?;
-    let desired_world = (host_world.w_axis
-        - glam::Vec4::new(child_attach.x, child_attach.y, child_attach.z, 0.0))
-    .truncate();
-    Some(target_world.inverse().transform_point3(desired_world))
+    let (host_translation, child_attach) = match child_docking_vehicle_translation(child.nmc.as_ref()) {
+        Some(child_attach) => {
+            let host_world = glam::Mat4::from_cols_array(&docking_host_world_matrix(builder, target_idx)?);
+            (host_world.w_axis.truncate(), child_attach)
+        }
+        None => (target_world.w_axis.truncate(), child_docking_collar_translation(child)?),
+    };
+    Some(target_world.inverse().transform_point3(host_translation - child_attach))
+}
+
+/// Index of the node that lists `node_idx` among its children, if any.
+fn find_parent_node_index(builder: &GlbBuilder, node_idx: u32) -> Option<u32> {
+    builder.nodes_json.iter().position(|node| {
+        node.children
+            .as_ref()
+            .is_some_and(|children| children.iter().any(|child| child.value() as u32 == node_idx))
+    }).map(|idx| idx as u32)
 }
 
 fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChildTransform> {
@@ -264,9 +288,13 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
         submesh_idx_accessors: Vec::new(),
     };
 
+    let root_has_nmc_hierarchy = input
+        .root_nmc
+        .as_ref()
+        .is_some_and(|nmc| !nmc.nodes.is_empty());
     let scene_nodes = if let Some(root_nmc) = input.root_nmc.as_ref().filter(|nmc| !nmc.nodes.is_empty()) {
         builder
-            .build_nmc_hierarchy(&dummy_packed, root_nmc, &input.root_mesh.submeshes, false)
+            .build_nmc_hierarchy(&dummy_packed, root_nmc, &input.root_mesh.submeshes, false, false)
             .into_iter()
             .map(json::Index::new)
             .collect::<Vec<_>>()
@@ -283,6 +311,11 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
     let mut load_textures = |_materials: Option<&crate::mtl::MtlFile>, _palette: Option<&crate::mtl::TintPalette>| {
         None
     };
+    // Everything emitted so far belongs to the root entity (its NMC hierarchy
+    // plus its skeleton bones). Nodes added past this point are contributed by
+    // children, which lets a child tell whether its parent is a root hardpoint
+    // or a node inside a sibling attachment.
+    let root_node_count = builder.nodes_json.len() as u32;
     let mut resolved = Vec::with_capacity(input.children.len());
 
     for child in &input.children {
@@ -328,6 +361,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
                 offset_rotation: child.offset_rotation,
                 detach_direction: child.detach_direction,
                 port_flags: child.port_flags.clone(),
+                docking_collar_port: child.docking_collar_port.clone(),
             },
             &scene_nodes,
             MaterialMode::None,
@@ -336,11 +370,34 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
             resolved_local_matrix,
         );
 
-        let local_transform_sc = flat_4x4_to_rows(
-            builder.nodes_json[child_idx as usize]
-                .matrix
-                .unwrap_or_else(identity_flat_4x4),
-        );
+        // Store the transform in the space the scene writer will parent this
+        // anchor into.
+        //
+        // A loadout child sits at identity relative to its hardpoint -- the
+        // hardpoint node carries the whole placement. When that hardpoint
+        // belongs to a skeleton-only root it never becomes an empty of its own,
+        // so the writer parents the anchor to the entity root; storing the local
+        // matrix there drops the placement and piles every attachment at the
+        // origin. Only such roots (the ARGO ATLS and its variants) need the
+        // world matrix -- a root that ships an NMC exports its hardpoints as
+        // real nodes, the writer parents the anchor to one of them, and a
+        // world matrix would then be applied twice.
+        //
+        // Children attached to a node *inside another child* (the ATLS battery
+        // hanging off the battery storage's `$IP_battery`) keep their local
+        // matrix: that ancestor is emitted as an anchor and already applies its
+        // own transform, so a root-relative matrix would be applied twice.
+        let parent_idx = find_parent_node_index(&builder, child_idx);
+        let parented_to_root_entity = parent_idx.is_none_or(|idx| idx < root_node_count);
+        let local_transform_sc = if parented_to_root_entity && !root_has_nmc_hierarchy {
+            flat_4x4_to_rows(builder.compute_node_world_matrix(child_idx as usize))
+        } else {
+            flat_4x4_to_rows(
+                builder.nodes_json[child_idx as usize]
+                    .matrix
+                    .unwrap_or_else(identity_flat_4x4),
+            )
+        };
         resolved.push(ResolvedChildTransform {
             local_transform_sc,
             resolved_no_rotation: child.no_rotation,
@@ -1511,17 +1568,40 @@ pub(crate) fn write_decomposed_export(
         let mut clips: Vec<serde_json::Value> = Vec::new();
         // Map from clip name → index in `clips`, used to merge same-named clips
         // from different child skeletons (e.g. landing_gear_extend from front/left/right CHRs).
+        // Names are namespaced per owning vehicle first, so a nested vehicle's
+        // clips only merge with each other.
         let mut name_to_index = std::collections::HashMap::<String, usize>::new();
+        // Skeletons that contributed to each merged clip, and the door items'
+        // own copies of their clips (see `append_door_clips`).
+        let mut contributors_by_name = std::collections::HashMap::<String, usize>::new();
+        let mut door_clips: Vec<(String, serde_json::Value, serde_json::Value)> = Vec::new();
 
-        let mut append_from_skeleton = |skeleton_path: &str, include_unmatched: bool, allow_bone_subset_fallback: bool| {
+        let mut append_from_skeleton = |skeleton_path: &str,
+                                        include_unmatched: bool,
+                                        allow_bone_subset_fallback: bool,
+                                        owner: Option<&str>,
+                                        door: Option<&EntityPayload>| {
             match crate::animation::extract_animations_for_skeleton_json(p4k, skeleton_path, include_unmatched, allow_bone_subset_fallback) {
                 Ok(Some(serde_json::Value::Array(values))) => {
                     for mut clip in values {
-                        let name = clip
+                        let raw_name = clip
                             .get("name")
                             .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .unwrap_or("");
+                        let name = if raw_name.is_empty() {
+                            String::new()
+                        } else {
+                            namespaced_clip_name(owner, raw_name)
+                        };
+                        if owner.is_some() && !name.is_empty() {
+                            clip["name"] = serde_json::Value::String(name.clone());
+                        }
+                        if !name.is_empty() {
+                            *contributors_by_name.entry(name.clone()).or_default() += 1;
+                            if let Some(door) = door {
+                                door_clips.push((name.clone(), door_clip_target(door), clip.clone()));
+                            }
+                        }
                         if name.is_empty() {
                             clips.push(clip);
                         } else if let Some(&existing_idx) = name_to_index.get(&name) {
@@ -1561,13 +1641,17 @@ pub(crate) fn write_decomposed_export(
         };
 
         if let Some(skeleton_path) = input.root_skeleton_source_path.as_deref() {
-            append_from_skeleton(skeleton_path, true, false);
+            append_from_skeleton(skeleton_path, true, false, None, None);
         }
+        let parent_by_entity = parent_entity_by_name(&input.children);
         for child in &input.children {
             if let Some(skeleton_path) = child.skeleton_source_path.as_deref() {
-                append_from_skeleton(skeleton_path, false, true);
+                let owner = child_animation_owner(child, &parent_by_entity, &input.nested_vehicle_names);
+                let door = is_door_item(child).then_some(child);
+                append_from_skeleton(skeleton_path, false, true, owner.as_deref(), door);
             }
         }
+        append_door_clips(&mut clips, door_clips, &contributors_by_name);
 
         if clips.is_empty() {
             None
@@ -3068,6 +3152,127 @@ fn string_value_to_json(value: &str) -> serde_json::Value {
     serde_json::json!(value)
 }
 
+/// Map each child entity name to the entity it attaches to (first wins).
+fn parent_entity_by_name(children: &[EntityPayload]) -> HashMap<&str, &str> {
+    let mut parents = HashMap::new();
+    for child in children {
+        parents
+            .entry(child.entity_name.as_str())
+            .or_insert(child.parent_entity_name.as_str());
+    }
+    parents
+}
+
+/// Nested vehicle whose animation namespace a child's clips belong to.
+///
+/// A vehicle carried inside the root (e.g. a docked snub) has its own
+/// Mannequin controller, so clips from its skeleton, its landing gear and
+/// anything attached to it must not merge with the root's same-named clips.
+/// Returns the nearest such vehicle among the child and its attachment
+/// ancestors, or `None` when the child belongs to the root.
+fn child_animation_owner(
+    child: &EntityPayload,
+    parent_by_entity: &HashMap<&str, &str>,
+    nested_vehicles: &HashSet<String>,
+) -> Option<String> {
+    if nested_vehicles.contains(&child.entity_name) {
+        return Some(child.entity_name.clone());
+    }
+    let mut current = child.parent_entity_name.as_str();
+    // Bounded walk: attachment names are not guaranteed to form a tree.
+    for _ in 0..=parent_by_entity.len() {
+        if nested_vehicles.contains(current) {
+            return Some(current.to_string());
+        }
+        current = parent_by_entity.get(current)?;
+    }
+    None
+}
+
+/// Whether a child is a door item, which the game opens and closes on its
+/// own. The Constellation GS Merlin dock is a `DockingAnimator`.
+fn is_door_item(child: &EntityPayload) -> bool {
+    child.attach_def_type.as_deref().is_some_and(|kind| {
+        kind.eq_ignore_ascii_case("Door") || kind.eq_ignore_ascii_case("DockingAnimator")
+    })
+}
+
+/// The scene instance a door's own clip animates. The left and right
+/// Constellation GS airlocks share one mesh, so only the instance tells them
+/// apart.
+fn door_clip_target(door: &EntityPayload) -> serde_json::Value {
+    serde_json::json!({
+        "entity_name": door.entity_name,
+        "parent_entity_name": door.parent_entity_name,
+        "parent_node_name": door.parent_node_name,
+    })
+}
+
+/// Name of a door's own clip: the clip name prefixed with its hardpoint,
+/// e.g. `hardpoint_door_airlock_body_left` + `door_open` gives
+/// `airlock_body_left_door_open`.
+fn door_clip_name(parent_node_name: &str, clip_name: &str) -> String {
+    let label = parent_node_name
+        .split('_')
+        .filter(|word| {
+            !word.is_empty()
+                && !word.eq_ignore_ascii_case("hardpoint")
+                && !word.eq_ignore_ascii_case("door")
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    if label.is_empty() {
+        clip_name.to_string()
+    } else {
+        format!("{}_{clip_name}", label.to_ascii_lowercase())
+    }
+}
+
+/// Add a clip per door for clips that several parts share.
+///
+/// Same-named clips merge so one action moves every landing gear leg, but
+/// the Constellation GS names its cargo lift, personal lift, Merlin dock,
+/// airlock and fuel port clips all `door_open`/`door_close`, and in game
+/// each opens separately. The merged clip stays; each door also gets its own
+/// copy, restricted to its scene instance by a `target`.
+fn append_door_clips(
+    clips: &mut Vec<serde_json::Value>,
+    door_clips: Vec<(String, serde_json::Value, serde_json::Value)>,
+    contributors_by_name: &HashMap<String, usize>,
+) {
+    let mut used_names: HashSet<String> = clips
+        .iter()
+        .filter_map(|clip| clip.get("name").and_then(|name| name.as_str()))
+        .map(str::to_string)
+        .collect();
+    for (name, target, mut clip) in door_clips {
+        if contributors_by_name.get(&name).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        let parent_node_name = target["parent_node_name"].as_str().unwrap_or_default();
+        let base = door_clip_name(parent_node_name, &name);
+        let mut door_name = base.clone();
+        let mut suffix = 1u32;
+        while used_names.contains(&door_name) {
+            suffix += 1;
+            door_name = format!("{base}_{suffix}");
+        }
+        used_names.insert(door_name.clone());
+        clip["name"] = serde_json::Value::String(door_name);
+        clip["target"] = target;
+        clips.push(clip);
+    }
+}
+
+/// Clip name in its owner's namespace: root clips keep their name, nested
+/// vehicle clips are prefixed with the vehicle's entity name.
+fn namespaced_clip_name(owner: Option<&str>, clip_name: &str) -> String {
+    match owner {
+        Some(owner) => format!("{owner}_{clip_name}"),
+        None => clip_name.to_string(),
+    }
+}
+
 fn merge_animation_channel_values(
     existing_value: &mut serde_json::Value,
     incoming_value: serde_json::Value,
@@ -3121,6 +3326,32 @@ fn hash_finish_entry(
 
 #[cfg(test)]
 mod tests {
+
+    use super::find_parent_node_index;
+
+    fn node_with_children(children: &[u32]) -> gltf_json::Node {
+        gltf_json::Node {
+            children: Some(children.iter().map(|i| gltf_json::Index::new(*i)).collect()),
+            ..Default::default()
+        }
+    }
+
+    /// The transform space a loadout child is stored in depends on whether its
+    /// anchor parents to the root entity or to a node inside a sibling
+    /// attachment, so the parent lookup has to be exact.
+    #[test]
+    fn find_parent_node_index_locates_the_owning_node() {
+        let mut builder = crate::gltf::GlbBuilder::new();
+        builder.nodes_json.push(node_with_children(&[1, 2]));
+        builder.nodes_json.push(gltf_json::Node::default());
+        builder.nodes_json.push(node_with_children(&[3]));
+        builder.nodes_json.push(gltf_json::Node::default());
+
+        assert_eq!(find_parent_node_index(&builder, 1), Some(0));
+        assert_eq!(find_parent_node_index(&builder, 2), Some(0));
+        assert_eq!(find_parent_node_index(&builder, 3), Some(2));
+        assert_eq!(find_parent_node_index(&builder, 0), None, "the root has no parent");
+    }
     use super::*;
     use crate::mtl;
 
@@ -3149,6 +3380,117 @@ mod tests {
 
         let arr = existing.as_array().expect("channel entry should remain an array");
         assert_eq!(arr.len(), 2);
+    }
+
+    fn attached(entity_name: &str, parent_entity_name: &str) -> EntityPayload {
+        EntityPayload {
+            mesh: sample_mesh(vec![]),
+            materials: None,
+            textures: None,
+            nmc: None,
+            palette: None,
+            geometry_path: String::new(),
+            material_path: String::new(),
+            bones: Vec::new(),
+            skeleton_source_path: None,
+            entity_name: entity_name.into(),
+            entity_category: None,
+            attach_def_type: None,
+            parent_node_name: String::new(),
+            parent_entity_name: parent_entity_name.into(),
+            no_rotation: false,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: String::new(),
+            docking_collar_port: None,
+        }
+    }
+
+    /// A docked snub's gear clips share names with the carrier's
+    /// (`landing_gear_compress`), but belong to the snub's own Mannequin
+    /// controller and must not merge into the carrier's clip.
+    #[test]
+    fn child_animation_owner_assigns_nested_vehicle_attachments_to_that_vehicle() {
+        let children = vec![
+            attached("LG_Rear1_Root_Skin.cdf", "Carrier"),
+            attached("Snub", "Carrier"),
+            attached("Snub_Landing_Gear_Front.cdf", "Snub"),
+            attached("Snub_Weapon", "Snub"),
+            attached("Snub_Weapon_Barrel", "Snub_Weapon"),
+        ];
+        let nested: HashSet<String> = ["Snub".to_string()].into_iter().collect();
+        let parents = parent_entity_by_name(&children);
+        let owners: Vec<Option<String>> = children
+            .iter()
+            .map(|child| child_animation_owner(child, &parents, &nested))
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                None,
+                Some("Snub".to_string()),
+                Some("Snub".to_string()),
+                Some("Snub".to_string()),
+                Some("Snub".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn child_animation_owner_terminates_on_cyclic_parent_names() {
+        let children = vec![attached("A", "B"), attached("B", "A")];
+        let parents = parent_entity_by_name(&children);
+        assert_eq!(child_animation_owner(&children[0], &parents, &HashSet::new()), None);
+    }
+
+    #[test]
+    fn door_clip_name_prefixes_the_hardpoint() {
+        assert_eq!(
+            door_clip_name("hardpoint_door_airlock_body_left", "door_open"),
+            "airlock_body_left_door_open"
+        );
+        assert_eq!(door_clip_name("hardpoint_door_elevator", "door_close"), "elevator_door_close");
+        assert_eq!(door_clip_name("hardpoint_cargo_bay", "door_open"), "cargo_bay_door_open");
+        assert_eq!(door_clip_name("", "door_open"), "door_open");
+    }
+
+    #[test]
+    fn shared_door_clips_get_a_targeted_copy_per_door() {
+        let clip = |name: &str| serde_json::json!({"name": name, "bones": {}});
+        let target = |port: &str| serde_json::json!({
+            "entity_name": "Door_Airlock",
+            "parent_entity_name": "Root",
+            "parent_node_name": port,
+        });
+        let mut clips = vec![clip("door_open"), clip("landing_gear_deploy")];
+        let door_clips = vec![
+            ("door_open".to_string(), target("hardpoint_door_airlock_body_left"), clip("door_open")),
+            ("door_open".to_string(), target("hardpoint_door_airlock_body_right"), clip("door_open")),
+            ("canopy_open".to_string(), target("hardpoint_canopy"), clip("canopy_open")),
+        ];
+        let contributors = HashMap::from([
+            ("door_open".to_string(), 2),
+            ("canopy_open".to_string(), 1),
+        ]);
+
+        append_door_clips(&mut clips, door_clips, &contributors);
+
+        let names: Vec<&str> = clips.iter().map(|clip| clip["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            ["door_open", "landing_gear_deploy", "airlock_body_left_door_open", "airlock_body_right_door_open"]
+        );
+        assert_eq!(clips[3]["target"]["parent_node_name"], "hardpoint_door_airlock_body_right");
+    }
+
+    #[test]
+    fn namespaced_clip_name_prefixes_only_nested_vehicle_clips() {
+        assert_eq!(namespaced_clip_name(None, "landing_gear_compress"), "landing_gear_compress");
+        assert_eq!(
+            namespaced_clip_name(Some("KRIG_P52_Merlin"), "landing_gear_compress"),
+            "KRIG_P52_Merlin_landing_gear_compress"
+        );
     }
 
     fn sample_submaterial() -> SubMaterial {
@@ -3309,6 +3651,7 @@ mod tests {
             model_max: [0.0, 0.0, 0.0],
             scaling_min: [0.0, 0.0, 0.0],
             scaling_max: [0.0, 0.0, 0.0],
+            skin_weights: None,
         }
     }
 
@@ -4422,6 +4765,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: String::new(),
+            docking_collar_port: None,
         };
         assert!(should_export_engine_glow_targets(&child));
 
@@ -4482,6 +4826,7 @@ mod tests {
             model_max: [0.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [0.0; 3],
+            skin_weights: None,
         }
     }
 
@@ -4527,7 +4872,7 @@ mod tests {
             submesh_mat_indices: Vec::new(),
             submesh_idx_accessors: Vec::new(),
         };
-        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false);
+        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false, false);
         let target_idx = *builder
             .node_name_to_idx
             .get("hardpoint_docking_module")
@@ -4552,6 +4897,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: "Docking_Request_Accepting".to_string(),
+            docking_collar_port: None,
         };
 
         let offset = docking_entity_attachment_offset(&builder, target_idx, &child)
@@ -4560,6 +4906,99 @@ mod tests {
         assert!((offset.x - 0.01448).abs() < 0.0001);
         assert!((offset.y - 3.24666).abs() < 0.0001);
         assert!((offset.z - 0.74132).abs() < 0.0001);
+    }
+
+    #[test]
+    fn docked_vehicle_mates_its_docking_collar_port_to_the_host_port() {
+        // Constellation Andromeda / P-52 Merlin helpers. The host port faces
+        // down, the Merlin's collar port faces up, and with both collars
+        // touching the Merlin's origin lands on the hull's authored
+        // `hardpoint_merlin_snap` helper.
+        let root_nmc = NodeMeshCombo {
+            nodes: vec![
+                test_nmc_node(
+                    "root",
+                    None,
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+                ),
+                test_nmc_node(
+                    "hardpoint_docking_collar_merlin",
+                    Some(0),
+                    [[-1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, -5.1890], [0.0, -1.0, 0.0, -1.3916]],
+                ),
+                test_nmc_node(
+                    "hardpoint_merlin_dock_door",
+                    Some(0),
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, -5.1890], [0.0, 0.0, 1.0, -1.3916]],
+                ),
+            ],
+            material_indices: Vec::new(),
+        };
+        // NMC transforms are parent-relative: the collar's model-space position
+        // (0, -1.9005, 0.8986) is only reached through its parent's offset.
+        let child_nmc = NodeMeshCombo {
+            nodes: vec![
+                test_nmc_node(
+                    "geo_body",
+                    None,
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, -0.5], [0.0, 0.0, 1.0, 1.0]],
+                ),
+                test_nmc_node(
+                    "hardpoint_docking_collar",
+                    Some(0),
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, -1.4005], [0.0, 1.0, 0.0, -0.1014]],
+                ),
+            ],
+            material_indices: Vec::new(),
+        };
+        let mut builder = GlbBuilder::new();
+        let dummy_packed = PackedMeshInfo {
+            mesh_idx: 0,
+            pos_accessor_idx: 0,
+            uv_accessor_idx: None,
+            secondary_uv_accessor_idx: None,
+            normal_accessor_idx: None,
+            color_accessor_idx: None,
+            tangent_accessor_idx: None,
+            submesh_mat_indices: Vec::new(),
+            submesh_idx_accessors: Vec::new(),
+        };
+        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false, false);
+        let target_idx = *builder
+            .node_name_to_idx
+            .get("hardpoint_docking_collar_merlin")
+            .expect("target node should exist") as usize;
+        let child = EntityPayload {
+            mesh: empty_test_mesh(),
+            materials: None,
+            textures: None,
+            nmc: Some(child_nmc),
+            palette: None,
+            geometry_path: "Objects/Spaceships/Ships/KRIG/P52_Merlin/test.cga".to_string(),
+            material_path: String::new(),
+            bones: Vec::new(),
+            skeleton_source_path: None,
+            entity_name: "KRIG_Test_Snub".to_string(),
+            entity_category: None,
+            attach_def_type: None,
+            parent_node_name: "hardpoint_docking_collar_merlin".to_string(),
+            parent_entity_name: "root".to_string(),
+            no_rotation: true,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: "Docking_Request_Accepting".to_string(),
+            docking_collar_port: Some("hardpoint_docking_collar".to_string()),
+        };
+
+        let offset = docking_entity_attachment_offset(&builder, target_idx, &child)
+            .expect("docking offset should be derived from the collar ports");
+        let target_world = glam::Mat4::from_cols_array(&builder.compute_node_world_matrix(target_idx));
+        let origin = target_world.transform_point3(offset);
+
+        assert!(origin.x.abs() < 0.0001, "{origin:?}");
+        assert!((origin.y - -3.2885).abs() < 0.0001, "{origin:?}");
+        assert!((origin.z - -2.2902).abs() < 0.0001, "{origin:?}");
     }
 
     #[test]

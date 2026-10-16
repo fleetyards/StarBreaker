@@ -54,6 +54,7 @@ from .animation_fps import (
     describe_reconciliation,
     reconcile_animation_fps,
 )
+from .skinning import ensure_skin_rigs
 from .validators import (
     _purge_orphaned_file_backed_images,
     _purge_orphaned_managed_materials,
@@ -1210,8 +1211,12 @@ def _shared_glow_control_payload(package_root: bpy.types.Object) -> dict[str, An
                     "blender_material_name": getattr(submaterial, "blender_material_name", None),
                 }
             )
-    if not targets:
-        return None
+    # Cache the "no targets" answer as well. The scan above walks every object in
+    # the package and parses each referenced material sidecar, so leaving it
+    # uncached made a package without shared-glow materials pay for the whole
+    # sweep again on every call -- and the tools panel calls this from `draw()`,
+    # i.e. on every redraw (~3s for the Corsair, with sidecars on a network
+    # drive). That is what stalls the viewport at a regular interval.
     data = {
         "label": "Shared Glow",
         "units": "emission_strength_delta",
@@ -1942,6 +1947,16 @@ def available_package_animation_names(package: PackageBundle) -> list[str]:
     return [name for name, _ in available_package_animation_items(package)]
 
 
+def _package_animation_identity(name: str, entity_prefix: str) -> str:
+    """Return a path-independent key for detecting duplicate clip entries."""
+    basename = name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    identity = Path(basename).stem.casefold()
+    prefix = entity_prefix.casefold()
+    if prefix and identity.startswith(f"{prefix}_"):
+        identity = identity[len(prefix) + 1 :]
+    return identity
+
+
 def available_package_animation_items(package: PackageBundle) -> list[tuple[str, str]]:
     """Return ``(clip_name, display_name)`` pairs for exported animations.
 
@@ -1957,6 +1972,10 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
         if _is_preferred_package_animation_name(str(clip.get("name", "")).strip())
     }
     entity_prefix = _entity_name_prefix(package)
+    preferred_identities = {
+        _package_animation_identity(name, entity_prefix)
+        for name in preferred_exact_names
+    }
 
     fragment_items: dict[tuple[str, str], tuple[int, str, str]] = {}
     items: list[tuple[str, str]] = []
@@ -1972,7 +1991,11 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
                     fragment_items[dedupe_key] = (specificity, key, display_name)
             continue
         if preferred_exact_names and clip_name not in preferred_exact_names:
-            continue
+            # Suppress only path-based duplicates of a short root clip.
+            # Distinct CAFs often carry the actual moving subassembly tracks
+            # while a root DBA clip drives only doors or a controller node.
+            if _package_animation_identity(clip_name, entity_prefix) in preferred_identities:
+                continue
         items.append((clip_name, _animation_display_name(clip, entity_prefix=entity_prefix)))
     items.extend((key, display_name) for _, key, display_name in fragment_items.values())
     return items
@@ -2017,9 +2040,72 @@ def _fragment_animation_variants(clip: dict[str, Any]) -> list[tuple[str, str, i
         if not display_name:
             display_name = _animation_display_name(clip)
         specificity = len(tags) + len(scopes)
-        dedupe_key = (fragment_name.lower(), "+".join(tag.lower() for tag in frag_tags))
+        dedupe_key = _fragment_selection_key(fragment_name, frag_tags)
         variants.append((_fragment_animation_key(clip_name, index), display_name, specificity, dedupe_key))
     return variants
+
+
+def _fragment_selection_key(fragment_name: str, frag_tags: list[str]) -> tuple[str, str]:
+    """Identity of a Mannequin request: fragment ID plus fragment tags."""
+    return (fragment_name.lower(), "+".join(tag.lower() for tag in frag_tags))
+
+
+def _combine_fragment_scope_options(
+    package: PackageBundle,
+    clip: dict[str, Any],
+    fragment: dict[str, Any],
+) -> dict[str, Any]:
+    """Return ``clip`` merged with the other options CryEngine plays alongside it.
+
+    One Mannequin request (e.g. ``Landing_Gear`` + ``Retract``) is resolved per
+    scope context, so it can play several fragment options at once: on the
+    Constellation the ``Landing_Gear``-tagged option drives the gear legs while
+    an untagged option swings the nacelle that carries them. The UI lists the
+    request once, so selecting it must play every option. Options driving
+    bones already covered are alternatives for the same scope, not companions,
+    and are skipped; so are options playing in the other direction.
+    """
+    fragment_name = str(fragment.get("fragment", "")).strip()
+    frag_tags = _fragment_tags(fragment, "frag_tags")
+    if not fragment_name or not frag_tags:
+        return clip
+    selection_key = _fragment_selection_key(fragment_name, frag_tags)
+    reverse = _effective_fragment_reverse_playback(fragment)
+    bones = dict(clip.get("bones") or {})
+    frame_count = clip.get("frame_count")
+    for other in _animation_clips(package):
+        if other is clip:
+            continue
+        other_fragments = other.get("fragments")
+        if not isinstance(other_fragments, list):
+            continue
+        for other_fragment in other_fragments:
+            if not isinstance(other_fragment, dict):
+                continue
+            other_key = _fragment_selection_key(
+                str(other_fragment.get("fragment", "")).strip(),
+                _fragment_tags(other_fragment, "frag_tags"),
+            )
+            if other_key != selection_key:
+                continue
+            if _effective_fragment_reverse_playback(other_fragment) != reverse:
+                continue
+            _hydrate_animation_clip(package, other)
+            other_bones = other.get("bones")
+            if not isinstance(other_bones, dict) or not other_bones:
+                continue
+            if bones.keys() & other_bones.keys():
+                continue
+            bones.update(other_bones)
+            other_frames = other.get("frame_count")
+            if isinstance(other_frames, (int, float)) and (
+                not isinstance(frame_count, (int, float)) or other_frames > frame_count
+            ):
+                frame_count = other_frames
+            break
+    if len(bones) == len(clip.get("bones") or {}):
+        return clip
+    return {**clip, "bones": bones, "frame_count": frame_count}
 
 
 def _animation_insert_label(animation_name: str | None, clip: dict[str, Any]) -> str:
@@ -2137,6 +2223,53 @@ def _fragment_semantic_reverse_playback(fragment: dict[str, Any] | None) -> bool
 
 def _effective_fragment_reverse_playback(fragment: dict[str, Any] | None) -> bool:
     return _fragment_reverse_playback(fragment) or _fragment_semantic_reverse_playback(fragment)
+
+
+# Mannequin fragment tags that refine an existing pose rather than replace it.
+_LAYERED_FRAGMENT_TAGS = {"compress"}
+
+
+def _clip_layers_over_base(
+    clip: dict[str, Any] | None,
+    fragment: dict[str, Any] | None,
+) -> bool:
+    """Whether enabling this clip should keep overlapping clips enabled.
+
+    A fragment-qualified selection answers directly. A bare clip name resolves
+    no fragment (see `_find_animation_selection`), so fall back to the clip's
+    own fragment list: a clip that exists *only* as layered fragments — as
+    `landing_gear_compress` does — layers, while `landing_gear_extend` carries
+    Deploy/Retract fragments too and keeps replacing the pose.
+    """
+    if isinstance(fragment, dict):
+        return _fragment_layers_over_base(fragment)
+    fragments = clip.get("fragments") if isinstance(clip, dict) else None
+    if not isinstance(fragments, list):
+        return False
+    known = [entry for entry in fragments if isinstance(entry, dict)]
+    return bool(known) and all(_fragment_layers_over_base(entry) for entry in known)
+
+
+def _fragment_layers_over_base(fragment: dict[str, Any] | None) -> bool:
+    """Whether this fragment plays on top of the current pose.
+
+    ``Deploy``/``Retract`` are opposite states of one scope, so enabling either
+    must switch the other off. ``Compress`` is different: CryEngine layers the
+    suspension travel over the deployed gear (the matching fragment inside
+    `landing_gear_extend` carries a ``LayerManualUpdate`` procedural on its own
+    scope layer). Since channels hold absolute parent-local transforms, applying
+    the narrower clip after the base one simply overwrites the shared joints --
+    nothing accumulates -- so `landing_gear_compress` may coexist with
+    `landing_gear_extend` instead of cancelling it.
+    """
+    if not isinstance(fragment, dict):
+        return False
+    tags = fragment.get("frag_tags")
+    if not isinstance(tags, list):
+        return False
+    return any(
+        isinstance(tag, str) and tag.strip().lower() in _LAYERED_FRAGMENT_TAGS for tag in tags
+    )
 
 
 def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str | None:
@@ -2725,6 +2858,14 @@ def apply_animation_mode_to_package_root(
 ) -> int:
     """Apply one animation in one of: none, snap_first, snap_last, action."""
     package = _load_package_from_root(package_root)
+    # Soft-skinned meshes deform through a rig that follows the bone objects;
+    # build it before the first pose so every mode below drives it.
+    ensure_skin_rigs(
+        context,
+        _iter_package_objects(package_root),
+        _object_source_name_candidates,
+        _bind_pose_payload,
+    )
     selection = _find_animation_selection(package, animation_name)
     if selection is None:
         raise RuntimeError(f"Animation '{animation_name}' not found in package sidecar")
@@ -2739,7 +2880,7 @@ def apply_animation_mode_to_package_root(
     # If enabling a clip that overlaps channels with already enabled clips,
     # disable those conflicting modes first so poses do not stack into an
     # impossible "exploded" state.
-    if normalized_mode != "none":
+    if normalized_mode != "none" and not _clip_layers_over_base(clip, fragment):
         target_hashes = _clip_bone_hashes(clip)
         conflicting_names: set[str] = set()
         if target_hashes:
@@ -2893,10 +3034,33 @@ def _apply_animation_mode_for_clip(
 
 
 def _clip_bone_hashes(clip: dict[str, Any]) -> set[str]:
+    """Bone hashes a clip moves.
+
+    Tracks that never change are left out: the Constellation GS landing gear
+    clip keys the nacelle turbine covers still, and counting them made
+    enabling the landing gear switch VTOL off.
+    """
     bones = clip.get("bones")
     if not isinstance(bones, dict):
         return set()
-    return {str(key) for key in bones.keys() if isinstance(key, str)}
+    return {
+        str(key)
+        for key, value in bones.items()
+        if isinstance(key, str) and not _bone_channels_are_static(value)
+    }
+
+
+def _bone_channels_are_static(value: Any) -> bool:
+    channels = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+    channels = [channel for channel in channels if isinstance(channel, dict)]
+    if not channels:
+        return False
+    for channel in channels:
+        for track in ("rotation", "position"):
+            samples = channel.get(track) or []
+            if any(sample != samples[0] for sample in samples[1:]):
+                return False
+    return True
 
 
 def _animation_clips(package: PackageBundle) -> list[dict[str, Any]]:
@@ -3036,7 +3200,7 @@ def _find_animation_selection(package: PackageBundle, animation_name: str) -> tu
             if isinstance(fragments, list) and 0 <= fragment_index < len(fragments):
                 fragment = fragments[fragment_index]
                 if isinstance(fragment, dict):
-                    return clip, fragment
+                    return _combine_fragment_scope_options(package, clip, fragment), fragment
             return clip, None
     for clip in _animation_clips(package):
         if str(clip.get("name", "")).strip() == target:
@@ -3549,13 +3713,28 @@ def _select_channel_variant_for_object(
     obj: bpy.types.Object,
     channels: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    channel, _decisive = _select_channel_variant_with_confidence(obj, channels)
+    return channel
+
+
+def _select_channel_variant_with_confidence(
+    obj: bpy.types.Object,
+    channels: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool]:
+    """Pick this object's channel variant and report whether the pick was decisive.
+
+    A decisive pick means one variant outscored every other, i.e. it was matched
+    on explicit provenance (``source_skeleton_path`` / ``source_node_name``)
+    rather than taken as the arbitrary first entry of a tie.
+    """
     if not channels:
-        return None
+        return None, False
     if len(channels) == 1:
-        return channels[0]
+        return channels[0], False
     scored = [(index, _channel_variant_score(obj, channel)) for index, channel in enumerate(channels)]
-    best_index, _best_score = max(scored, key=lambda item: (item[1], -item[0]))
-    return channels[best_index]
+    best_index, best_score = max(scored, key=lambda item: (item[1], -item[0]))
+    runner_up = max((score for index, score in scored if index != best_index), default=best_score)
+    return channels[best_index], best_score > runner_up
 
 
 def _position_track_matches_bind(
@@ -3719,11 +3898,15 @@ def _select_animation_sample_decoder(
 def _animation_bone_candidates(
     package_root: bpy.types.Object,
     bones: dict[str, list[dict[str, Any]]],
+    target: Any = None,
 ) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool], str]:
     candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
+    decisive_ids: set[int] = set()
 
     for obj in _iter_candidate_bone_objects(package_root):
+        if not _object_matches_clip_target(obj, target):
+            continue
         key = None
         variants = None
         for candidate_key in _object_bone_hash_keys(obj):
@@ -3733,7 +3916,7 @@ def _animation_bone_candidates(
                 break
         if key is None or not isinstance(variants, list) or not variants:
             continue
-        channel = _select_channel_variant_for_object(obj, variants)
+        channel, decisive = _select_channel_variant_with_confidence(obj, variants)
         if not isinstance(channel, dict):
             continue
         _store_bind_pose_once(obj)
@@ -3741,11 +3924,104 @@ def _animation_bone_candidates(
         if bind_data is None:
             continue
 
+        if decisive:
+            decisive_ids.add(id(obj))
         candidates.append((obj, key, bind_data, channel))
         groups.setdefault(key, []).append((obj, bind_data, channel))
 
     decoder = _select_animation_sample_decoder(candidates)
-    return candidates, _shared_hash_position_policy(groups, decoder=decoder), decoder
+    policy = _shared_hash_position_policy(groups, decoder=decoder)
+    # The shared-hash guard assumes a track may belong to some other part that
+    # merely collides on the bone hash. When the variant was matched on explicit
+    # provenance that assumption is wrong, and the track's authored deviation
+    # from the shared bind is intentional -- e.g. the Corsair's three landing
+    # gears link one skin, so the tail legs' extended pose sits ~0.37m off the
+    # front leg's bind and suppressing position leaves them half-folded.
+    for obj_id in decisive_ids:
+        policy.pop(obj_id, None)
+    candidates = [
+        candidate
+        for candidate in candidates
+        if not _channel_holds_bind_pose(candidate[3], candidate[2], decoder)
+    ]
+    return candidates, policy, decoder
+
+
+def _channel_holds_bind_pose(
+    channel: dict[str, Any],
+    bind_data: dict[str, Any],
+    decoder: str,
+) -> bool:
+    """Whether a channel only holds its part still at the bind pose.
+
+    Such a track does nothing on its own but would undo another clip's pose
+    of the same part: the Constellation GS landing gear clip keys the nacelle
+    turbine covers still at cruise, and applying it after VTOL snapped them
+    back. In game the VTOL pose wins, so these tracks are skipped.
+    """
+    rotations = [sample for sample in channel.get("rotation") or [] if isinstance(sample, list) and len(sample) >= 4]
+    positions = [sample for sample in channel.get("position") or [] if isinstance(sample, list) and len(sample) >= 3]
+    if not rotations and not positions:
+        return False
+    if any(sample != rotations[0] for sample in rotations[1:]):
+        return False
+    if any(sample != positions[0] for sample in positions[1:]):
+        return False
+    if rotations:
+        bind_rotation = bind_data.get("rotation_quaternion")
+        if not isinstance(bind_rotation, list) or len(bind_rotation) < 4:
+            return False
+        rotation = _decode_animation_rotation(rotations[0], decoder)
+        if abs(sum(a * float(b) for a, b in zip(rotation, bind_rotation))) < 0.9999:
+            return False
+    if positions:
+        bind_location = bind_data.get("location")
+        if not isinstance(bind_location, list) or len(bind_location) < 3:
+            return False
+        position = _decode_animation_position(positions[0], decoder)
+        if sum((a - float(b)) ** 2 for a, b in zip(position, bind_location)) > 1e-6:
+            return False
+    return True
+
+
+def _object_matches_clip_target(obj: bpy.types.Object, target: Any) -> bool:
+    """Whether ``obj`` belongs to the scene instance a clip is restricted to.
+
+    A door's own clip carries a ``target`` naming its instance (entity, parent
+    entity and hardpoint): the Constellation GS airlocks share one mesh, so
+    without it opening the left airlock would open the right one too. Clips
+    without a target animate every matching object.
+    """
+    if not isinstance(target, dict) or not target:
+        return True
+    # A mesh's animated nodes are plain children; the instance record sits on
+    # the nearest ancestor that was placed for the scene instance.
+    current = obj
+    payload = None
+    for _ in range(64):
+        if current is None:
+            break
+        payload = current.get(PROP_INSTANCE_JSON)
+        if isinstance(payload, str):
+            break
+        current = current.parent
+    if not isinstance(payload, str):
+        return False
+    try:
+        instance = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(instance, dict):
+        return False
+    # scene.blend records name the mesh node in ``entity_name`` and the scene
+    # child in ``scene_entity_name``; importer records only have the latter's
+    # value, under ``entity_name``.
+    if instance.get("scene_entity_name"):
+        instance = {**instance, "entity_name": instance["scene_entity_name"]}
+    return all(
+        str(instance.get(key, "") or "") == str(value or "")
+        for key, value in target.items()
+    )
 
 
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
@@ -4032,7 +4308,9 @@ def _apply_animation_pose(
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
-    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(
+        package_root, bones, clip.get("target")
+    )
     updated = 0
     for obj, key, bind_data, channel in candidates:
         allow_position = position_policy.get(id(obj), True)
@@ -4170,7 +4448,9 @@ def _insert_animation_action(
         "driven_hashes": sorted(_clip_bone_hashes(clip)),
     }
 
-    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(
+        package_root, bones, clip.get("target")
+    )
     updated = 0
     # Multi-clip mode: when prior instances exist, clear live action from all
     # objects so NLA is the sole driver.  This covers the case where the first

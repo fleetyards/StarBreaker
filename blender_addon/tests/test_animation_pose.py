@@ -374,7 +374,7 @@ class AnimationPoseTests(unittest.TestCase):
         bones = {
             source_hash: [
                 {
-                    "rotation": [[1.0, 0.0, 0.0, 0.0]],
+                    "rotation": [[0.0, 0.0, 0.0, 1.0]],
                 }
             ]
         }
@@ -405,6 +405,59 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertIs(candidates[0][0], child)
         self.assertEqual(candidates[0][1], source_hash)
 
+    def test_still_tracks_do_not_count_as_moved_bones(self) -> None:
+        # Constellation GS: the landing gear clip keys the nacelle turbine
+        # covers still; counting them switched VTOL off with the gear.
+        clip = {
+            "bones": {
+                "0x00000001": {"rotation": [[0.222, 0.0, 0.0, 0.975]] * 3},
+                "0x00000002": {"rotation": [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0]]},
+                "0x00000003": [
+                    {"position": [[1.0, 2.0, 3.0]] * 2},
+                    {"position": [[1.0, 2.0, 3.0], [1.0, 2.5, 3.0]]},
+                ],
+            }
+        }
+
+        self.assertEqual(self.package_ops._clip_bone_hashes(clip), {"0x00000002", "0x00000003"})
+
+    def test_channel_holding_the_bind_pose_is_skipped(self) -> None:
+        bind = self._bind_data((1.0, 2.0, 3.0))
+        holds_bind = {"rotation": [[1.0, 0.0, 0.0, 0.0]] * 3, "position": [[1.0, 2.0, 3.0]] * 3}
+        holds_other = {"rotation": [[0.0, 1.0, 0.0, 0.0]] * 3}
+        moves = {"rotation": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]}
+
+        self.assertTrue(self.package_ops._channel_holds_bind_pose(holds_bind, bind, "identity"))
+        self.assertFalse(self.package_ops._channel_holds_bind_pose(holds_other, bind, "identity"))
+        self.assertFalse(self.package_ops._channel_holds_bind_pose(moves, bind, "identity"))
+
+    def test_targeted_clip_only_animates_its_door_instance(self) -> None:
+        # The Constellation GS airlocks share one mesh; a door's own clip
+        # names its hardpoint so the other airlock stays shut.
+        root = self._make_object("StarBreaker RSI Constellation Andromeda GS_LOD0_TEX0", (0.0, 0.0, 0.0))
+        left = self._make_object("door_anim", (1.0, 0.0, 0.0))
+        right = self._make_object("door_anim", (-1.0, 0.0, 0.0))
+        for obj, port in ((left, "hardpoint_door_airlock_body_left"), (right, "hardpoint_door_airlock_body_right")):
+            obj["starbreaker_instance_json"] = json.dumps({
+                "entity_name": "Door_Airlock",
+                "parent_entity_name": "Root",
+                "parent_node_name": port,
+            })
+        root.children_recursive = [left, right]
+        source_hash = f"0x{zlib.crc32(b'door_anim') & 0xFFFFFFFF:08X}"
+        bones = {source_hash: [{"rotation": [[0.0, 0.0, 0.0, 1.0]]}]}
+        target = {
+            "entity_name": "Door_Airlock",
+            "parent_entity_name": "Root",
+            "parent_node_name": "hardpoint_door_airlock_body_left",
+        }
+
+        targeted, _policy, _decoder = self.package_ops._animation_bone_candidates(root, bones, target)
+        untargeted, _policy, _decoder = self.package_ops._animation_bone_candidates(root, bones)
+
+        self.assertEqual([candidate[0] for candidate in targeted], [left])
+        self.assertEqual(len(untargeted), 2)
+
     def test_channel_variant_selection_uses_parent_hierarchy_provenance(self) -> None:
         rear_parent = self._make_object("door_upper_anim_001_0_drak_clipper_landing_gear_rear", (0, 0, 0))
         rear_obj = self._make_object("door_upper_anim_001_14_swingarm_big_anim", (0, 0, 0))
@@ -419,6 +472,55 @@ class AnimationPoseTests(unittest.TestCase):
         }
 
         self.assertIs(self.package_ops._select_channel_variant_for_object(rear_obj, [front, rear]), rear)
+
+    def test_channel_variant_confidence_reports_decisive_provenance_match(self) -> None:
+        left_parent = self._make_object("body_105_hardpoint_tail_landing_gear_left", (0, 0, 0))
+        left_obj = self._make_object("BONE_foot_001", (0.0, 0.5282, -2.7299))
+        left_obj.parent = left_parent
+        front = {
+            "source_skeleton_path": "Objects/.../DRAK_Corsair_Landing_Gear_Front_CHR.chr",
+            "position": [[0.0, 0.5282, -2.7299]],
+        }
+        left = {
+            "source_skeleton_path": "Objects/.../DRAK_Corsair_Landing_Gear_Left_CHR.chr",
+            "position": [[0.0, 0.158, -2.746]],
+        }
+
+        channel, decisive = self.package_ops._select_channel_variant_with_confidence(
+            left_obj, [front, left]
+        )
+        self.assertIs(channel, left)
+        self.assertTrue(decisive)
+
+    def test_channel_variant_confidence_is_false_when_variants_tie(self) -> None:
+        obj = self._make_object("BONE_foot_001", (0.0, 0.5282, -2.7299))
+        first = {"position": [[0.0, 0.0, 0.0]]}
+        second = {"position": [[1.0, 0.0, 0.0]]}
+
+        channel, decisive = self.package_ops._select_channel_variant_with_confidence(
+            obj, [first, second]
+        )
+        self.assertIs(channel, first)
+        self.assertFalse(decisive)
+
+    def test_compress_only_clip_layers_over_the_base_pose(self) -> None:
+        compress = {"name": "landing_gear_compress", "fragments": [{"frag_tags": ["Compress"]}]}
+        self.assertTrue(self.package_ops._clip_layers_over_base(compress, None))
+
+    def test_deploy_retract_clip_does_not_layer(self) -> None:
+        extend = {
+            "name": "landing_gear_extend",
+            "fragments": [
+                {"frag_tags": ["Deploy"]},
+                {"frag_tags": ["Retract"]},
+                {"frag_tags": ["Compress"]},
+            ],
+        }
+        self.assertFalse(self.package_ops._clip_layers_over_base(extend, None))
+
+    def test_clip_without_fragments_does_not_layer(self) -> None:
+        door = {"name": "door_close"}
+        self.assertFalse(self.package_ops._clip_layers_over_base(door, None))
 
     def test_channel_variant_selection_prefers_direct_mesh_asset_over_parent_tokens(self) -> None:
         rear_parent = self._make_object("body_7_drak_clipper_landing_gear_rear_door_right", (0, 0, 0))

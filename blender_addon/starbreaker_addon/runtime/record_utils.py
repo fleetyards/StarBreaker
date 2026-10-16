@@ -305,6 +305,25 @@ def _float_authored_attribute(submaterial: SubmaterialRecord, *names: str) -> fl
     return 0.0
 
 
+def _emissive_opacity_factor(submaterial: SubmaterialRecord) -> float:
+    """How much of the authored ``Emissive`` colour the engine shows.
+
+    Shader families with an ``EmissiveOpacity`` public param (GlassPBR,
+    DisplayScreen) scale their emissive colour by it, so a material can
+    author an ``Emissive`` colour that never glows. The Constellation Mk5's
+    interior bridge glass authors ``Emissive="1,0.13,0"`` with
+    ``EmissiveOpacity="0"``; emitting it anyway turned the whole canopy
+    orange. Materials without the param emit their colour unscaled.
+    """
+    value = submaterial.public_params.get("EmissiveOpacity")
+    if value is None:
+        return 1.0
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def _mesh_decal_authored_emission_strength(
     submaterial: SubmaterialRecord,
     *,
@@ -316,6 +335,42 @@ def _mesh_decal_authored_emission_strength(
     if emissive_texture_path:
         return 1.0
     return 0.0
+
+
+def _mesh_decal_diffuse_multipliers(
+    submaterial: SubmaterialRecord,
+) -> tuple[tuple[float, float, float] | None, float | None]:
+    """Authored ``Diffuse`` colour and ``Opacity`` that scale a diffuse decal.
+
+    CryEngine multiplies a decal's own diffuse map by the material's
+    ``Diffuse`` colour and its alpha by ``Opacity``. Without them a faint
+    near-black grime decal (Star Runner ``Ext_Dirt_Decals``: Diffuse 0.023,
+    Opacity 0.17) renders its texture times its vertex colours at full
+    strength -- bright blue streaks where the vertex colour is blue.
+
+    Only decals that draw their own diffuse map qualify: stencil decals take
+    their colour from the tint palette and author unrelated ``Diffuse``
+    values. ``Opacity`` is skipped for alpha-tested decals
+    (``DISABLE_ALPHA_BLEND``). Returns ``None`` for neutral factors.
+    """
+    if submaterial.shader_family != "MeshDecal" or submaterial.decoded_feature_flags.has_stencil_map:
+        return None, None
+    string_gen_mask = (_authored_attribute_string(submaterial, "StringGenMask") or "").upper()
+    if "DIFFUSE_MAP" not in string_gen_mask or "STENCIL_MAP" in string_gen_mask:
+        return None, None
+    colour = _authored_attribute_triplet(submaterial, "Diffuse")
+    if colour is not None and all(abs(channel - 1.0) < 1e-4 for channel in colour):
+        colour = None
+    opacity: float | None = None
+    if "DISABLE_ALPHA_BLEND" not in string_gen_mask:
+        raw_opacity = _authored_attribute_string(submaterial, "Opacity")
+        try:
+            opacity = float(raw_opacity) if raw_opacity is not None else None
+        except ValueError:
+            opacity = None
+        if opacity is not None and opacity >= 1.0 - 1e-4:
+            opacity = None
+    return colour, opacity
 
 
 def _hard_surface_angle_shift_enabled(submaterial: SubmaterialRecord) -> bool:

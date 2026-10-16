@@ -1,6 +1,7 @@
 //! Interior mesh discovery, loading, and preloading orchestration.
 //!
-//! Discovers interior CGF geometry from DataCore (`load_interiors`), builds
+//! Discovers interior CGF geometry from DataCore (`load_interiors`, including
+//! containers nested under `<ChildObjectContainers>`), builds
 //! interior containers from socpak payloads (`build_interiors_from_payloads`),
 //! preloads unique CGF meshes in parallel (`preload_interior_meshes`) and their
 //! associated texture sets (`preload_interior_textures`). Also contains
@@ -93,7 +94,7 @@ pub(crate) fn load_interiors(
     let root_nmc = (!root_geometry_path.is_empty())
         .then(|| load_nmc_for_cgf(p4k, &root_geometry_path))
         .flatten();
-    let container_instances: Vec<_> = containers
+    let top_level_instances: Vec<_> = containers
         .iter()
         .map(|container| {
             let helper_transform =
@@ -114,7 +115,7 @@ pub(crate) fn load_interiors(
             let parent_node_name = helper_transform
                 .and(container.bone_name.as_ref().filter(|name| !name.is_empty()).cloned());
             (
-                container,
+                container.file_name.clone(),
                 container_transform,
                 reference_transform,
                 parent_entity_name,
@@ -122,22 +123,23 @@ pub(crate) fn load_interiors(
             )
         })
         .collect();
+    let container_instances = with_child_object_containers(p4k, top_level_instances);
     let mut root_item_port_reference_candidates: std::collections::HashMap<String, Vec<[[f32; 4]; 4]>> =
         std::collections::HashMap::new();
-    for (container, _, reference_transform, _, _) in &container_instances {
+    for (file_name, _, reference_transform, _, _) in &container_instances {
         root_item_port_reference_candidates
-            .entry(container.file_name.to_ascii_lowercase())
+            .entry(file_name.to_ascii_lowercase())
             .or_default()
             .push(*reference_transform);
     }
-    for (container, container_transform, _, parent_entity_name, parent_node_name) in &container_instances {
+    for (file_name, container_transform, _, parent_entity_name, parent_node_name) in &container_instances {
         let reference_candidates = root_item_port_reference_candidates
-            .get(&container.file_name.to_ascii_lowercase())
+            .get(&file_name.to_ascii_lowercase())
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         match socpak::load_interior_from_socpak(
             p4k,
-            &container.file_name,
+            file_name,
             *container_transform,
             glam::Mat4::IDENTITY.to_cols_array_2d(),
             reference_candidates,
@@ -152,14 +154,17 @@ pub(crate) fn load_interiors(
                 payload.parent_node_name = parent_node_name.clone();
                 payloads.push(payload);
             }
-            Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
+            Err(e) => log::warn!("failed to load {file_name}: {e}"),
         }
     }
 
     let mut loaded =
         build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
-    let removed =
-        remove_root_geometry_duplicate_interior_placements(&mut loaded, &root_geometry_path);
+    let removed = remove_root_geometry_duplicate_interior_placements(
+        &mut loaded,
+        &root_geometry_path,
+        &root_entity_name,
+    );
     if removed > 0 {
         log::info!(
             "Skipped {removed} root-geometry duplicate interior placement(s) for '{}'",
@@ -167,6 +172,43 @@ pub(crate) fn load_interiors(
         );
     }
     loaded
+}
+
+/// `(socpak, container transform, reference transform, parent entity, parent node)`.
+type ContainerInstance = (String, [[f32; 4]; 4], [[f32; 4]; 4], Option<String>, Option<String>);
+
+/// Nested containers can themselves nest; past this depth a cycle is assumed.
+const MAX_CHILD_CONTAINER_DEPTH: usize = 8;
+
+/// Append the containers each container lists under `<ChildObjectContainers>`,
+/// recursively. A child is placed relative to its parent container and hangs
+/// off the same parent node.
+fn with_child_object_containers(p4k: &MappedP4k, top_level: Vec<ContainerInstance>) -> Vec<ContainerInstance> {
+    let mut instances = Vec::with_capacity(top_level.len());
+    let mut pending: Vec<(ContainerInstance, usize)> = top_level.into_iter().rev().map(|instance| (instance, 0)).collect();
+    while let Some((instance, depth)) = pending.pop() {
+        if depth < MAX_CHILD_CONTAINER_DEPTH {
+            let children = crate::socpak_children::child_object_containers(p4k, &instance.0);
+            for child in children.into_iter().rev() {
+                log::info!("  nested container {} inside {}", child.file_name, instance.0);
+                let local = mat4_from_array(&child.local_transform);
+                pending.push((
+                    (
+                        child.file_name,
+                        mat4_to_array(mat4_from_array(&instance.1) * local),
+                        mat4_to_array(mat4_from_array(&instance.2) * local),
+                        instance.3.clone(),
+                        instance.4.clone(),
+                    ),
+                    depth + 1,
+                ));
+            }
+        } else {
+            log::warn!("nested containers deeper than {MAX_CHILD_CONTAINER_DEPTH} under {}", instance.0);
+        }
+        instances.push(instance);
+    }
+    instances
 }
 
 fn helper_node_name_matches(node_name: &str, helper_name: &str) -> bool {
@@ -191,6 +233,7 @@ fn normalize_geometry_path_key(path: &str) -> String {
 fn remove_root_geometry_duplicate_interior_placements(
     interiors: &mut LoadedInteriors,
     root_geometry_path: &str,
+    root_entity_name: &str,
 ) -> usize {
     let root_key = normalize_geometry_path_key(root_geometry_path);
     if root_key.is_empty() {
@@ -199,7 +242,16 @@ fn remove_root_geometry_duplicate_interior_placements(
 
     let mut removed = 0usize;
     for container in &mut interiors.containers {
-        if container.parent_entity_name.is_some() {
+        // Containers bolted onto one of the root entity's own bones (e.g. the
+        // Corsair's `nose` interior) still belong to the root hull, so a
+        // placement of the root geometry inside them is the same authoring
+        // duplicate as in an unparented container. Only a container owned by a
+        // *different* entity may legitimately place that geometry.
+        if container
+            .parent_entity_name
+            .as_deref()
+            .is_some_and(|name| !name.eq_ignore_ascii_case(root_entity_name))
+        {
             continue;
         }
         container.placements.retain(|(mesh_index, _, _)| {
@@ -251,23 +303,25 @@ fn remove_root_geometry_duplicate_interior_placements(
     removed
 }
 
+/// A container's `Offset` is its placement in the root entity's space; the
+/// `boneName` helper only decides which node it moves with. So the
+/// root-space transform is the offset itself, whatever the helper.
 fn compose_root_container_transform(
     offset_position: [f32; 3],
     offset_rotation: [f32; 3],
-    helper_transform: Option<glam::Mat4>,
+    _helper_transform: Option<glam::Mat4>,
 ) -> [[f32; 4]; 4] {
-    let offset = mat4_from_array(&crate::socpak::build_container_transform(
-        offset_position,
-        offset_rotation,
-    ));
-    let base = match helper_transform {
-        Some(helper_transform) if helper_transform_duplicates_offset(helper_transform, offset) => offset,
-        Some(helper_transform) => helper_transform * offset,
-        None => offset,
-    };
-    mat4_to_array(base)
+    crate::socpak::build_container_transform(offset_position, offset_rotation)
 }
 
+/// The container's transform relative to its helper node: the root-space
+/// offset expressed in the helper's frame.
+///
+/// Usually the offset repeats the helper's own position (identity here), but
+/// variants reuse containers authored for a sibling hull: the Phoenix GS
+/// hangs the Andromeda's comp bays (offset y=19.75) off its own
+/// `hardpoint_int_cockpit` (y=23.25). Stacking the offset on the helper put
+/// them ~20 m past the nose.
 fn compose_helper_relative_container_transform(
     offset_position: [f32; 3],
     offset_rotation: [f32; 3],
@@ -281,7 +335,8 @@ fn compose_helper_relative_container_transform(
         Some(helper_transform) if helper_transform_duplicates_offset(helper_transform, offset) => {
             glam::Mat4::IDENTITY
         }
-        Some(_) | None => offset,
+        Some(helper_transform) => helper_transform.inverse() * offset,
+        None => offset,
     };
     mat4_to_array(local)
 }
@@ -1000,6 +1055,34 @@ pub(crate) fn export_cgf_from_path(
     export_entity_from_paths_cached(p4k, geometry_path, mtl_path, opts, png_cache, use_model_bbox)
 }
 
+/// Whether an interior CGF's node transforms must be baked into its vertices.
+///
+/// Vertices are read in node space (scaling bbox). When the model bbox
+/// differs, the mesh nodes sit off the file root and multi-node CGFs need
+/// their transforms baked -- the Star Runner data pod only stands on the
+/// floor that way, and CGA nodes are an animated hierarchy whose transforms
+/// always apply (the habitation desk). A static CGF with a single mesh node
+/// is drawn in that node's own space instead: baking its 1.46 m offset lifted
+/// the Star Runner server cages through the scanning room ceiling and hull.
+fn interior_mesh_needs_node_bake(
+    geometry_path: &str,
+    mesh: &crate::types::Mesh,
+    nmc: Option<&crate::nmc::NodeMeshCombo>,
+) -> bool {
+    const GEOMETRY_NODE: u16 = 0;
+    let boxes_differ = mesh
+        .scaling_min
+        .iter()
+        .zip(&mesh.model_min)
+        .chain(mesh.scaling_max.iter().zip(&mesh.model_max))
+        .any(|(s, m)| (s - m).abs() > 0.01);
+    let is_cga = geometry_path.to_ascii_lowercase().ends_with(".cga");
+    let single_mesh_node = nmc.is_some_and(|nmc| {
+        nmc.nodes.iter().filter(|node| node.geometry_type == GEOMETRY_NODE).count() == 1
+    });
+    boxes_differ && (is_cga || !single_mesh_node)
+}
+
 pub(crate) fn load_interior_mesh_asset(
     p4k: &MappedP4k,
     entry: &InteriorCgfEntry,
@@ -1015,13 +1098,7 @@ pub(crate) fn load_interior_mesh_asset(
         false,
     ) {
         Ok((mesh, mtl, _tex, nmc, _palette, _, _, _bones, _skeleton_source_path)) => {
-            let needs_bake = mesh
-                .scaling_min
-                .iter()
-                .zip(&mesh.model_min)
-                .chain(mesh.scaling_max.iter().zip(&mesh.model_max))
-                .any(|(s, m)| (s - m).abs() > 0.01);
-            let mesh = if needs_bake {
+            let mesh = if interior_mesh_needs_node_bake(&entry.cgf_path, &mesh, nmc.as_ref()) {
                 bake_nmc_into_mesh(mesh, nmc.as_ref(), false)
             } else {
                 mesh
@@ -1182,6 +1259,74 @@ mod tests {
     };
     use crate::pipeline::nmc_bridge::mat4_from_array;
 
+    fn mesh_node(name: &str, parent: Option<u16>, geometry_type: u16, z: f32) -> crate::nmc::NmcNode {
+        let matrix = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, z]];
+        crate::nmc::NmcNode {
+            name: name.to_string(),
+            parent_index: parent,
+            world_to_bone: matrix,
+            bone_to_world: matrix,
+            scale: [1.0; 3],
+            geometry_type,
+            properties: Default::default(),
+        }
+    }
+
+    fn offset_bbox_mesh() -> crate::types::Mesh {
+        let mut mesh = crate::pipeline::child_payload::empty_child_mesh();
+        mesh.scaling_min = [-0.72, -0.08, -1.55];
+        mesh.scaling_max = [0.72, 0.15, 1.55];
+        mesh.model_min = [-0.08, 0.03, -0.09];
+        mesh.model_max = [1.37, 0.26, 3.01];
+        mesh
+    }
+
+    /// Star Runner `server_cage_b.cgf`: one mesh node 1.46 m above a helper
+    /// root. The game draws it in node space -- the cages flank the data pods
+    /// from the floor -- so baking the node offset lifted the cages through
+    /// the scanning room ceiling and the hull.
+    #[test]
+    fn single_mesh_node_interior_cgf_stays_in_node_space() {
+        let cage = crate::nmc::NodeMeshCombo {
+            nodes: vec![mesh_node("server_cage_mesh2", Some(1), 0, 1.457), mesh_node("server_cage_b", None, 3, 0.0)],
+            material_indices: Vec::new(),
+        };
+        let path = "objects/spaceships/ships/crus/star_runner/interior/server_room/server_cage_b.cgf";
+        assert!(!super::interior_mesh_needs_node_bake(path, &offset_bbox_mesh(), Some(&cage)));
+    }
+
+    /// CGA nodes are an animated hierarchy: the Star Runner habitation desk
+    /// (one mesh node) floated 0.6 m above the floor without its transform.
+    #[test]
+    fn single_mesh_node_interior_cga_bakes_node_transform() {
+        let desk = crate::nmc::NodeMeshCombo {
+            nodes: vec![mesh_node("Object150496", Some(1), 0, -0.63), mesh_node("desk", None, 3, 0.0)],
+            material_indices: Vec::new(),
+        };
+        let path = "Objects/Spaceships/Ships/CRUS/Star_Runner/Interior/Habitation/CRUS_StarRunner_Habitation_Desk.CGA";
+        assert!(super::interior_mesh_needs_node_bake(path, &offset_bbox_mesh(), Some(&desk)));
+    }
+
+    /// `crus_star_runner_data_pod.cgf` has two mesh nodes; their transforms
+    /// put the pod on the floor, so they are still baked.
+    #[test]
+    fn multi_mesh_node_interior_cgf_bakes_node_transforms() {
+        let pod = crate::nmc::NodeMeshCombo {
+            nodes: vec![
+                mesh_node("data_pod_mesh", Some(2), 0, 0.996),
+                mesh_node("Object164012", Some(0), 0, 0.324),
+                mesh_node("CRUS_Star_Runner_Data_Pod", None, 2, 0.0),
+            ],
+            material_indices: Vec::new(),
+        };
+        let path = "objects/spaceships/ships/crus/star_runner/interior/server_room/crus_star_runner_data_pod.cgf";
+        assert!(super::interior_mesh_needs_node_bake(path, &offset_bbox_mesh(), Some(&pod)));
+        let mut aligned = offset_bbox_mesh();
+        aligned.model_min = aligned.scaling_min;
+        aligned.model_max = aligned.scaling_max;
+        assert!(!super::interior_mesh_needs_node_bake(path, &aligned, Some(&pod)));
+    }
+
     #[test]
     fn helper_node_name_matches_prefixed_helper_suffix() {
         assert!(helper_node_name_matches(
@@ -1196,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_root_container_transform_composes_full_helper_transform() {
+    fn compose_root_container_transform_keeps_root_space_offset_for_distinct_helper() {
         let helper_transform = glam::Mat4::from_rotation_translation(
             glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
             glam::Vec3::new(1.0, 2.0, 3.0),
@@ -1207,11 +1352,10 @@ mod tests {
             Some(helper_transform),
         );
         let transform = mat4_from_array(&transform);
-        let expected = helper_transform
-            * mat4_from_array(&crate::socpak::build_container_transform(
-                [2.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0],
-            ));
+        let expected = mat4_from_array(&crate::socpak::build_container_transform(
+            [2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ));
         let actual = transform.to_cols_array();
         let expected = expected.to_cols_array();
         for (actual, expected) in actual.iter().zip(expected.iter()) {
@@ -1285,17 +1429,20 @@ mod tests {
     }
 
     #[test]
-    fn compose_helper_relative_container_transform_keeps_offset_for_distinct_helper() {
-        let helper = glam::Mat4::from_translation(glam::Vec3::new(0.0, 20.0, 0.0));
+    fn compose_helper_relative_container_transform_expresses_offset_in_distinct_helper_frame() {
+        // Phoenix GS: Andromeda comp bay (offset y=19.75) on the Phoenix's
+        // hardpoint_int_cockpit (y=23.25) must stay at y=19.75 in ship space.
+        let helper = glam::Mat4::from_translation(glam::Vec3::new(0.0, 23.25, 3.25));
         let transform = compose_helper_relative_container_transform(
-            [0.0, 35.0, 0.0],
+            [0.0, 19.75, 3.0],
             [0.0, 0.0, 0.0],
             Some(helper),
         );
         let transform = mat4_from_array(&transform);
-        let expected = mat4_from_array(&crate::socpak::build_container_transform(
-            [0.0, 35.0, 0.0],
-            [0.0, 0.0, 0.0],
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(0.0, -3.5, -0.25));
+        assert!((helper * transform).transform_point3(glam::Vec3::ZERO).abs_diff_eq(
+            glam::Vec3::new(0.0, 19.75, 3.0),
+            1e-5
         ));
         let actual = transform.to_cols_array();
         let expected = expected.to_cols_array();
@@ -1396,17 +1543,28 @@ mod tests {
                     lights: Vec::new(),
                     palette: None,
                 },
+                InteriorContainerData {
+                    name: "root_bone_container".to_string(),
+                    parent_entity_name: Some("EntityClassDefinition.Test".to_string()),
+                    parent_node_name: Some("nose".to_string()),
+                    container_transform: identity,
+                    placements: vec![(0, identity, None), (1, identity, None)],
+                    lights: Vec::new(),
+                    palette: None,
+                },
             ],
         };
 
         let removed = remove_root_geometry_duplicate_interior_placements(
             &mut interiors,
             "Data/Objects/Ships/Test/root.cga",
+            "EntityClassDefinition.Test",
         );
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert_eq!(interiors.containers[0].placements.len(), 1);
         assert_eq!(interiors.containers[1].placements.len(), 1);
+        assert_eq!(interiors.containers[2].placements.len(), 1);
     }
 
     #[test]

@@ -412,12 +412,29 @@ fn resolve_sub_geometry(idx: &EntityIndex, children: &mut [LoadoutNode]) {
         if !should_attempt_sub_geometry_resolution(child.geometry_path.as_deref(), &variants) {
             continue;
         }
-        if let Some(m) = match_sub_geometry_variant(&variants, &child.port_tags, child.helper_bone_name.as_deref(), &child.item_port_name) {
+        let matched = if variants_belong_to_item(child.geometry_path.as_deref(), &variants) {
+            match_sub_geometry_variant(&variants, &child.port_tags, child.helper_bone_name.as_deref(), &child.item_port_name)
+        } else {
+            log::debug!(
+                "  SubGeometry: {} variants are not its own geometry {}; matching port tags only",
+                child.entity_name,
+                child.geometry_path.as_deref().unwrap_or("")
+            );
+            match_sub_geometry_variant(&variants, &child.port_tags, None, "")
+        };
+        if let Some(m) = matched {
             log::debug!("  SubGeometry: {} tag='{}' -> {}", child.entity_name, m.tag, m.geometry_path);
             child.geometry_path = Some(m.geometry_path.clone());
             if !m.material_path.is_empty() { child.material_path = Some(m.material_path.clone()); }
         } else if variants.len() > 1 {
-            if has_multiple_geometry_variants(&variants) {
+            if !needs_variant_fallback(child.geometry_path.as_deref()) {
+                log::debug!(
+                    "  SubGeometry: {} matched no variant for port='{}'; keeping default geometry {}",
+                    child.entity_name,
+                    child.item_port_name,
+                    child.geometry_path.as_deref().unwrap_or("")
+                );
+            } else if has_multiple_geometry_variants(&variants) {
                 log::warn!(
                     "  SubGeometry: {} has {} variants but none matched port='{}' bone='{}' tags='{}'. Variants: [{}]",
                     child.entity_name, variants.len(), child.item_port_name,
@@ -465,6 +482,46 @@ fn should_attempt_sub_geometry_resolution(
     variants: &[SubGeometryVariant],
 ) -> bool {
     geometry_path.is_some() || !variants.is_empty()
+}
+
+/// Whether an entity with no matching SubGeometry variant should borrow an
+/// unclaimed one. Only entities without geometry of their own do: the
+/// Carrack's thrusters carry the 600i's variants left over in their records,
+/// and taking those replaced the Carrack's own engines with 600i parts.
+fn needs_variant_fallback(geometry_path: Option<&str>) -> bool {
+    geometry_path.is_none_or(|path| path.trim().is_empty())
+}
+
+/// Whether an item's SubGeometry variants are alternatives to its own mesh.
+///
+/// The Merlin's left wing was cloned from the 350R winglet and kept all six
+/// winglet variants next to its own wing mesh; matching `hardpoint_wing_left`
+/// against them swapped the Merlin wing for the 350R's. Variants are often
+/// meshes other than the default (the Bengal's engines default to a generic
+/// thruster and pick left/right hull meshes), so the tell is the
+/// manufacturer: variants from another manufacturer's folder than the item's
+/// own mesh are leftovers, and only explicit port tags may pick one.
+fn variants_belong_to_item(geometry_path: Option<&str>, variants: &[SubGeometryVariant]) -> bool {
+    let Some(own) = geometry_path.and_then(geometry_manufacturer) else {
+        return true;
+    };
+    variants.iter().any(|variant| {
+        geometry_manufacturer(&variant.geometry_path).is_none_or(|maker| maker == own)
+    })
+}
+
+/// Manufacturer folder of a ship part mesh:
+/// `objects/spaceships/<category>/<manufacturer>/...`.
+fn geometry_manufacturer(path: &str) -> Option<String> {
+    let normalized = path.trim().replace('\\', "/").to_ascii_lowercase();
+    let mut segments = normalized.split('/').filter(|segment| !segment.is_empty());
+    if segments.next()? != "objects" || segments.next()? != "spaceships" {
+        return None;
+    }
+    segments.next()?;
+    let manufacturer = segments.next()?;
+    // A mesh directly in the category folder has no manufacturer folder.
+    (!manufacturer.contains('.')).then(|| manufacturer.to_string())
 }
 
 fn has_multiple_geometry_variants(variants: &[SubGeometryVariant]) -> bool {
@@ -561,9 +618,20 @@ fn best_sub_geometry_variant_match<'a>(
     variants: &'a [SubGeometryVariant],
     selector: &str,
 ) -> Option<&'a SubGeometryVariant> {
-    let selector_token_set: HashSet<String> = selector_tokens(selector).into_iter().collect();
-    if selector_token_set.is_empty() {
+    let tokens = selector_tokens(selector);
+    if tokens.is_empty() {
         return None;
+    }
+    // Tags and port names disagree on word separators: the Andromeda's retro
+    // thrusters tag `topleft` for port `hardpoint_retro_top_left`. Also accept
+    // every run of consecutive selector words joined together.
+    let mut selector_token_set: HashSet<String> = HashSet::new();
+    for start in 0..tokens.len() {
+        let mut joined = String::new();
+        for token in &tokens[start..] {
+            joined.push_str(token);
+            selector_token_set.insert(joined.clone());
+        }
     }
 
     variants
@@ -835,6 +903,76 @@ mod tests {
         );
     }
 
+    /// The Andromeda's retro thrusters tag their variants `topleft`,
+    /// `bottomright`, ... while the ports spell `hardpoint_retro_top_left`.
+    /// Without a match the unclaimed-variant fallback handed out the meshes
+    /// in variant order and put every thruster on the wrong hardpoint.
+    #[test]
+    fn match_sub_geometry_variant_joins_separated_port_words() {
+        let variants: Vec<SubGeometryVariant> = ["topleft", "topright", "bottomleft", "bottomright"]
+            .iter()
+            .map(|tag| SubGeometryVariant {
+                tag: tag.to_string(),
+                geometry_path: format!("objects/retro_{tag}.cga"),
+                material_path: String::new(),
+            })
+            .collect();
+
+        for (port, tag) in [
+            ("hardpoint_retro_top_left", "topleft"),
+            ("hardpoint_retro_top_right", "topright"),
+            ("hardpoint_retro_bottom_left", "bottomleft"),
+            ("hardpoint_retro_bottom_right", "bottomright"),
+        ] {
+            let matched = match_sub_geometry_variant(&variants, "", None, port)
+                .unwrap_or_else(|| panic!("{port} should match a variant"));
+            assert_eq!(matched.tag, tag, "{port}");
+        }
+    }
+
+    #[test]
+    fn variants_from_another_manufacturer_are_leftovers() {
+        let variant = |tag: &str, path: &str| SubGeometryVariant {
+            tag: tag.to_string(),
+            geometry_path: path.to_string(),
+            material_path: String::new(),
+        };
+        let winglets = vec![
+            variant("wing left", "objects/spaceships/ships/orig/300_series/orig_350r_winglet_wing_left.cga"),
+            variant("wing right", "objects/spaceships/ships/orig/300_series/orig_350r_winglet_wing_right.cga"),
+        ];
+        // Merlin left wing: its own KRIG mesh, with the 350R winglets left over.
+        assert!(!variants_belong_to_item(
+            Some("objects/spaceships/ships/krig/p52_merlin/krig_p52_merlin_wing_left.cga"),
+            &winglets
+        ));
+        // 350R winglet.
+        assert!(variants_belong_to_item(
+            Some("Objects\\Spaceships\\Ships\\ORIG\\300_series\\orig_350r_winglet_nose_left.cga"),
+            &winglets
+        ));
+        assert!(variants_belong_to_item(None, &winglets));
+
+        // Bengal engines: generic default thruster, hull-specific variants.
+        let bengal = vec![
+            variant("l", "objects/spaceships/ships/rsi/bengal/exterior/rsi_bengal_engine_main_l.cga"),
+            variant("r", "objects/spaceships/ships/rsi/bengal/exterior/rsi_bengal_engine_main_r.cga"),
+        ];
+        assert!(variants_belong_to_item(
+            Some("objects/spaceships/thrusters/rsi/bengal/bengal_engine_small.cga"),
+            &bengal
+        ));
+    }
+
+    #[test]
+    fn only_entities_without_own_geometry_borrow_unmatched_variants() {
+        assert!(needs_variant_fallback(None));
+        assert!(needs_variant_fallback(Some("")));
+        assert!(!needs_variant_fallback(Some(
+            "Objects/Spaceships/Thrusters/ANVL/ANVL_Carrack_Thrusters/ANVL_Carrack_Thruster_Main_Large.cga"
+        )));
+    }
+
     #[test]
     fn has_multiple_geometry_variants_ignores_material_only_differences() {
         let variants = vec![
@@ -881,6 +1019,22 @@ fn extract_loadout_from_value<'v, 'a>(entity_val: &'v Value<'a>) -> Option<&'v V
     None
 }
 
+/// Collect the children of `record`'s own `SEntityComponentDefaultLoadoutParams`.
+/// Each child entity's loadout is small, so this Value query is cheap.
+fn collect_default_loadout(idx: &EntityIndex, record: &Record, out: &mut Vec<LoadoutNode>, depth: usize) {
+    if let Ok(compiled) = idx.db.compile_path::<Value>(
+        record.struct_id(),
+        "Components[SEntityComponentDefaultLoadoutParams]",
+    ) && let Ok(components) = idx.db.query_no_references(&compiled, record)
+    {
+        for component in &components {
+            if let Some(loadout) = get_object_field(component, "loadout") {
+                collect_entries_recursive(idx, loadout, out, depth);
+            }
+        }
+    }
+}
+
 /// Walk a loadout Value tree recursively, collecting LoadoutNodes.
 /// The `loadout_value` is a SItemPortLoadoutManualParams with an `entries` array.
 /// Each entry may have its own nested `loadout` field, and may reference child
@@ -915,6 +1069,16 @@ fn collect_entries_recursive(
         if !class_name.is_empty() {
             // Path A: entityClassName — O(1) lookup via EntityIndex
             let child = if let Some(child_record) = idx.find_record(class_name) {
+                // An entry that lists nothing for the item's own ports leaves
+                // them to the item's default loadout -- a snub named on its
+                // carrier's docking port still brings its thrusters, guns and
+                // docking collar.
+                let entry_lists_children = get_object_field(entry, "loadout")
+                    .and_then(|nested| get_array_field(nested, "entries"))
+                    .is_some_and(|entries| !entries.is_empty());
+                if !entry_lists_children {
+                    collect_default_loadout(idx, child_record, &mut grandchildren, depth + 1);
+                }
                 let (child_geom, child_mtl) = idx.query_geometry_paths(child_record);
                 let has_geom = child_geom.is_some();
                 log::debug!(
@@ -1058,18 +1222,7 @@ fn collect_entries_recursive(
                 let (ref_geom, ref_mtl) = idx.query_geometry_paths(ref_record);
 
                 // Also resolve the referenced entity's OWN loadout for nested children.
-                // Each child entity's loadout is small, so this Value query is cheap.
-                if let Ok(compiled) = idx.db.compile_path::<Value>(
-                    ref_record.struct_id(),
-                    "Components[SEntityComponentDefaultLoadoutParams]",
-                ) && let Ok(components) = idx.db.query_no_references(&compiled, ref_record)
-                {
-                    for component in &components {
-                        if let Some(loadout) = get_object_field(component, "loadout") {
-                            collect_entries_recursive(idx, loadout, &mut grandchildren, depth + 1);
-                        }
-                    }
-                }
+                collect_default_loadout(idx, ref_record, &mut grandchildren, depth + 1);
 
                 let has_geom = ref_geom.is_some();
                 log::debug!(
