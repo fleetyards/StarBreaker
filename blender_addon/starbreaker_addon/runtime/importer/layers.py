@@ -167,6 +167,28 @@ class LayersMixin:
             if layer_channel_name is not None and metallic_value < 0.5
             else (_mean_triplet(specular_color) or 0.0)
         )
+        # The same (1,1,1) sentinel on an untinted dielectric layer is no F0
+        # of 1 either: read as one, it made a mirror of every trim, cable and
+        # thruster glow that carries it (twelve layers on the DRAK Ironclad,
+        # its nozzles rendering white). It gets a dielectric's 0.04.
+        if layer_channel_name is None and metallic_value < 0.5 and specular_value >= 0.99:
+            specular_value = 0.04
+        # A layer without a palette channel (PaletteTint 0) takes no palette
+        # finish either: palette_finish_* fall back to the primary channel for
+        # a missing name, which added the primary's specular on top of the
+        # layer's own F0 -- the DRAK Ironclad's untinted engine trim
+        # (Trim_Connectors, F0 0.038) reflected as 0.116 and read as grey.
+        palette_finish_name = layer_channel_name
+        palette_specular_value = (
+            (_mean_triplet(palette_finish_specular(palette, palette_finish_name)) or 0.0)
+            if palette_finish_name is not None
+            else 0.0
+        )
+        palette_glossiness = (
+            palette_finish_glossiness_factor(palette, palette_finish_name)
+            if palette_finish_name is not None
+            else None
+        )
         return self._connect_layer_surface_group(
             nodes,
             links,
@@ -190,12 +212,9 @@ class LayersMixin:
             palette=palette,
             palette_channel_name=layer_channel_name,
             palette_finish_channel_name=layer_channel_name,
-            palette_glossiness=palette_finish_glossiness_factor(palette, layer_channel_name),
+            palette_glossiness=palette_glossiness,
             specular_value=specular_value,
-            palette_specular_value=_mean_triplet(
-                palette_finish_specular(palette, layer_channel_name)
-            )
-            or 0.0,
+            palette_specular_value=palette_specular_value,
             metallic_value=metallic_value,
             specular_color=specular_color,
             x=x + 420,
