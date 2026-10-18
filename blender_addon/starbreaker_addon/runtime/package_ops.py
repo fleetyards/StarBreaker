@@ -2104,9 +2104,14 @@ def _combine_fragment_scope_options(
             other_bones = other.get("bones")
             if not isinstance(other_bones, dict) or not other_bones:
                 continue
-            if bones.keys() & other_bones.keys():
+            shared = bones.keys() & other_bones.keys()
+            if any(_same_rig(bones[key], other_bones[key]) for key in shared):
                 continue
-            bones.update(other_bones)
+            for key, value in other_bones.items():
+                if key in shared:
+                    bones[key] = _channel_variants(bones[key]) + _channel_variants(value)
+                else:
+                    bones[key] = value
             other_frames = other.get("frame_count")
             if isinstance(other_frames, (int, float)) and (
                 not isinstance(frame_count, (int, float)) or other_frames > frame_count
@@ -2116,6 +2121,33 @@ def _combine_fragment_scope_options(
     if len(bones) == len(clip.get("bones") or {}):
         return clip
     return {**clip, "bones": bones, "frame_count": frame_count}
+
+
+def _channel_variants(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _channel_skeletons(value: Any) -> set[str]:
+    """The skeletons a bone entry's channels were authored for.
+
+    Two options sharing a bone name drive the same scope only when they share
+    a skeleton: the Caterpillar's rear gear (`landing_gear_extend`) has two
+    bone names in common with its side gear (`landing_gear_extend_a`), from a
+    different rig, and was dropped as an alternative -- its gear stayed down
+    in flight. A channel without provenance counts as every skeleton.
+    """
+    skeletons = set()
+    for channel in _channel_variants(value):
+        path = channel.get("source_skeleton_path") if isinstance(channel, dict) else None
+        skeletons.add(str(path).strip().lower() if path else "*")
+    if "*" in skeletons:
+        return {"*"}
+    return skeletons
+
+
+def _same_rig(a: Any, b: Any) -> bool:
+    left, right = _channel_skeletons(a), _channel_skeletons(b)
+    return "*" in left or "*" in right or bool(left & right)
 
 
 def _animation_insert_label(animation_name: str | None, clip: dict[str, Any]) -> str:
@@ -3662,10 +3694,30 @@ def _object_provenance_tokens(obj: bpy.types.Object, *, include_self: bool = Tru
     return tokens
 
 
+def _nearest_mesh_asset(obj: bpy.types.Object) -> str:
+    """The mesh asset of `obj`, or of its nearest ancestor that has one.
+
+    Bone empties carry no asset of their own; their part's mesh does. The
+    Paladin's rear gear rig shares `joint_knee` with the front rig, and its
+    names carry both directions (`joint_front_ankle_001_3_joint_knee` under
+    `..._anvl_paladin_rear_landing_gear`), so without the asset the two
+    variants tied and the rear knee took the front rig's channel.
+    """
+    current = obj
+    visited = 0
+    while current is not None and visited < 16:
+        visited += 1
+        asset = str(current.get(PROP_MESH_ASSET, "") or "").strip().lower()
+        if asset:
+            return asset
+        current = current.parent
+    return ""
+
+
 def _channel_variant_score(obj: bpy.types.Object, channel: dict[str, Any]) -> int:
     obj_source = str(obj.get(PROP_SOURCE_NODE_NAME, "") or "").strip().lower()
     obj_template = str(obj.get(PROP_TEMPLATE_PATH, "") or "").strip().lower()
-    obj_mesh_asset = str(obj.get(PROP_MESH_ASSET, "") or "").strip().lower()
+    obj_mesh_asset = _nearest_mesh_asset(obj)
     channel_source = str(channel.get("source_node_name", "") or "").strip().lower()
     channel_skeleton = str(channel.get("source_skeleton_path", "") or "").strip().lower()
 
@@ -3913,6 +3965,16 @@ def _animation_bone_candidates(
     candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
     decisive_ids: set[int] = set()
+    # The rigs this clip animates. A part of one of them takes no channel
+    # authored for another: the Paladin's rear gear has an
+    # `m_lower_leg_shell` the clip does not move, and took the front gear's.
+    clip_skeletons = {
+        stem
+        for variants in bones.values()
+        for channel in variants
+        if isinstance(channel, dict)
+        and (stem := _asset_stem(str(channel.get("source_skeleton_path", "") or "").strip().lower()))
+    }
 
     for obj in _iter_candidate_bone_objects(package_root):
         if not _object_matches_clip_target(obj, target):
@@ -3928,6 +3990,10 @@ def _animation_bone_candidates(
             continue
         channel, decisive = _select_channel_variant_with_confidence(obj, variants)
         if not isinstance(channel, dict):
+            continue
+        own_rig = _asset_stem(_nearest_mesh_asset(obj))
+        channel_rig = _asset_stem(str(channel.get("source_skeleton_path", "") or "").strip().lower())
+        if own_rig in clip_skeletons and channel_rig and channel_rig != own_rig:
             continue
         _store_bind_pose_once(obj)
         bind_data = _bind_pose_payload(obj)
