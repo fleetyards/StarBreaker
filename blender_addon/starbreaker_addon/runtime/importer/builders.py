@@ -1710,6 +1710,15 @@ class BuildersMixin:
         )
         primary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot6"), x=-720, y=-420)
         primary_roughness, _primary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, primary_normal_ref, x=-460, y=-140)
+        # Without a material channel palette_finish_* fall back to the primary
+        # channel, which put the primary's specular on untinted trims (Hull B
+        # engine nozzles, Trim_D: 0.768 -- flat white). Same rule as layers.
+        illum_palette_glossiness = (
+            palette_finish_glossiness_factor(palette, material_channel) if material_channel is not None else None
+        )
+        illum_palette_specular = (
+            (_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0) if material_channel is not None else 0.0
+        )
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
         primary = self._connect_layer_surface_group(
             nodes,
@@ -1737,9 +1746,9 @@ class BuildersMixin:
             palette=palette,
             palette_channel_name=material_channel,
             palette_finish_channel_name=material_channel,
-            palette_glossiness=palette_finish_glossiness_factor(palette, material_channel),
+            palette_glossiness=illum_palette_glossiness,
             specular_value=0.0,
-            palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
+            palette_specular_value=illum_palette_specular,
             metallic_value=0.0,
             specular_color=None,
             specular_socket=primary_specular,
@@ -1803,9 +1812,9 @@ class BuildersMixin:
                 palette=palette,
                 palette_channel_name=material_channel,
                 palette_finish_channel_name=material_channel,
-                palette_glossiness=palette_finish_glossiness_factor(palette, material_channel),
+                palette_glossiness=illum_palette_glossiness,
                 specular_value=0.0,
-                palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
+                palette_specular_value=illum_palette_specular,
                 metallic_value=0.0,
                 specular_color=None,
                 specular_socket=secondary_specular,
