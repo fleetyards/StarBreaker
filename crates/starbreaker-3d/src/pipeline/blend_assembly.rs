@@ -3744,6 +3744,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     let mut source_node_ptr_by_name = HashMap::new();
     let mut source_node_ptrs_by_scene_instance: HashMap<usize, HashMap<String, u64>> = HashMap::new();
     let mut local_source_node_ptrs_by_instance = Vec::new();
+    let mut anchor_ptrs_by_instance: Vec<u64> = Vec::new();
     let preallocated_local_object_ptrs = (0..children_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let mut source_object_ptr_by_name = HashMap::new();
     let mut source_object_ptrs_by_scene_instance: HashMap<usize, HashMap<String, u64>> = HashMap::new();
@@ -3777,6 +3778,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
             }
         }
         let anchor_ptr = ptrs.alloc();
+        anchor_ptrs_by_instance.push(anchor_ptr);
         let anchor_coll_obj_ptr = ptrs.alloc();
         let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(package_name, instance));
         let mut local_source_node_ptrs = HashMap::new();
@@ -3854,46 +3856,59 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
             .parent_node_name
             .as_ref()
             .and_then(|name| {
-                instance
-                    .parent_entity_name
-                    .as_ref()
-                    .and_then(|parent_entity_name| {
-                        mesh_instances_input[..idx]
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find_map(|(parent_idx, candidate)| {
-                                if candidate.entity_name != *parent_entity_name {
-                                    return None;
-                                }
-                                local_source_node_ptrs_by_instance
-                                    .get(parent_idx)
+                let parents = || {
+                    mesh_instances_input[..idx]
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .filter(|(_, candidate)| Some(&candidate.entity_name) == instance.parent_entity_name.as_ref())
+                };
+                parents()
+                    .find_map(|(parent_idx, candidate)| {
+                        local_source_node_ptrs_by_instance
+                            .get(parent_idx)
+                            .and_then(|nodes| lookup_named_ptr(nodes, name))
+                            .or_else(|| {
+                                source_node_ptrs_by_scene_instance
+                                    .get(&candidate.scene_instance_id)
                                     .and_then(|nodes| lookup_named_ptr(nodes, name))
-                                    .or_else(|| {
-                                        source_node_ptrs_by_scene_instance
-                                            .get(&candidate.scene_instance_id)
-                                            .and_then(|nodes| lookup_named_ptr(nodes, name))
-                                    })
-                                    .or_else(|| {
-                                        candidate
-                                            .name
-                                            .eq_ignore_ascii_case(name)
-                                            .then_some(preallocated_local_object_ptrs[parent_idx])
-                                    })
+                            })
+                            .or_else(|| {
+                                // The authored name: the scene name of a second copy
+                                // carries a `_001` suffix, so the Tyilui's left turret
+                                // bubble matched no `turret_yaw` of its own turret and
+                                // went to the right one.
+                                (candidate.source_object_name.eq_ignore_ascii_case(name)
+                                    || candidate.name.eq_ignore_ascii_case(name))
+                                    .then_some(preallocated_local_object_ptrs[parent_idx])
                             })
                     })
                     .or_else(|| {
                         source_node_ptrs_by_scene_instance
                             .get(&instance.scene_instance_id)
                             .and_then(|nodes| lookup_named_ptr(nodes, name))
-                            .or_else(|| lookup_named_ptr(&source_node_ptr_by_name, name))
-                            .or_else(|| {
-                                source_object_ptrs_by_scene_instance
-                                    .get(&instance.scene_instance_id)
-                                    .and_then(|objects| lookup_named_ptr(objects, name))
-                            })
-                            .or_else(|| lookup_named_ptr(&source_object_ptr_by_name, name))
                     })
+                    .or_else(|| {
+                        source_object_ptrs_by_scene_instance
+                            .get(&instance.scene_instance_id)
+                            .and_then(|objects| lookup_named_ptr(objects, name))
+                    })
+                    .or_else(|| {
+                        // A port with no helper node of its own (the Railen turret's
+                        // `hardpoint_turret_ring`) sits at its parent item's origin:
+                        // the anchor of the first mesh of the nearest copy of that
+                        // item, the one on the item's own hardpoint (later meshes
+                        // hang off nodes inside it). The scene-wide lookups below
+                        // would find a namesake on another copy of the item, or
+                        // nothing and drop the part at the ship's origin.
+                        let copy = parents().next()?.1.scene_instance_id;
+                        parents()
+                            .filter(|(_, candidate)| candidate.scene_instance_id == copy)
+                            .last()
+                            .map(|(parent_idx, _)| anchor_ptrs_by_instance[parent_idx])
+                    })
+                    .or_else(|| lookup_named_ptr(&source_node_ptr_by_name, name))
+                    .or_else(|| lookup_named_ptr(&source_object_ptr_by_name, name))
             })
             .or_else(|| {
                 instance
@@ -4155,9 +4170,8 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                                             .and_then(|nodes| lookup_named_ptr(nodes, node_name))
                                     })
                                     .or_else(|| {
-                                        candidate
-                                            .name
-                                            .eq_ignore_ascii_case(node_name)
+                                        (candidate.source_object_name.eq_ignore_ascii_case(node_name)
+                                            || candidate.name.eq_ignore_ascii_case(node_name))
                                             .then_some(preallocated_local_object_ptrs[parent_idx])
                                     })
                             })

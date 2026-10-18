@@ -319,7 +319,19 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
     let mut resolved = Vec::with_capacity(input.children.len());
 
     for child in &input.children {
-        let resolved_local_matrix = if child.no_rotation {
+        // A port with no helper node in its item (the Railen turret's
+        // `hardpoint_turret_ring`) sits at the item's origin and takes its
+        // orientation: there is no helper rotation for NoRotation to undo, and
+        // undoing whatever node the fallbacks below find turned the Tyilui's
+        // turret rings 90 degrees off.
+        let port_has_helper = child.parent_node_name.is_empty()
+            || builder.node_name_to_idx.contains_key(&child.parent_node_name.to_lowercase())
+            || child.parent_entity_name.to_lowercase().ends_with(&input.entity_name.to_lowercase());
+        let resolved_local_matrix = if child.no_rotation && !port_has_helper {
+            // Keep it on the item (attach_child_entity's NoRotation path would
+            // move it to the scene root with the item's position baked in).
+            Some(offset_to_gltf_matrix(child.offset_position, child.offset_rotation).unwrap_or(identity_flat_4x4()))
+        } else if child.no_rotation {
             let target_idx = builder
                 .node_name_to_idx
                 .get(&child.parent_node_name.to_lowercase())
