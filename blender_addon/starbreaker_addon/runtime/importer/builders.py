@@ -46,6 +46,7 @@ from ..constants import (
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets, _set_group_input_default
 from ..package_ops import _string_prop
 from ..record_utils import (
+    _authored_attribute_triplet,
     _emissive_opacity_factor,
     _float_authored_attribute,
     _float_public_param,
@@ -55,6 +56,7 @@ from ..record_utils import (
     _matching_texture_reference,
     _mean_triplet,
     _optional_float_public_param,
+    _public_param_triplet,
     _resolve_public_param_default,
     _resolved_submaterial_palette_color,
     _routes_virtual_tint_palette_decal_alpha_to_decal_source,
@@ -1589,6 +1591,45 @@ class BuildersMixin:
         self._wire_surface_shader_to_output(nodes, links, surface_shader, output, plan, submaterial)
         self._configure_material(material, blend_method=plan.blend_method, shadow_method=plan.shadow_method)
 
+    def _legacy_blend_layer_mask(self, nodes: Any, links: Any, submaterial: SubmaterialRecord) -> Any:
+        """CryEngine 3 Illum %BLENDLAYER: the blend map (TexSlot12, red) times
+        the vertex alpha, scaled by 1 + BlendFactor, to the power BlendFalloff."""
+        mask_node = self._image_node(nodes, self._texture_path_for_slot(submaterial, "TexSlot12"), x=-1100, y=160, is_color=False)
+        if mask_node is None:
+            return None
+        tiling = _float_public_param(submaterial, "BlendMaskTiling") or 1.0
+        if abs(tiling - 1.0) > 1e-6:
+            uv = nodes.new("ShaderNodeTexCoord")
+            uv.location = (-1500, 160)
+            scale = nodes.new("ShaderNodeVectorMath")
+            scale.operation = "SCALE"
+            scale.location = (-1300, 160)
+            scale.inputs["Scale"].default_value = tiling
+            links.new(uv.outputs["UV"], scale.inputs[0])
+            links.new(scale.outputs[0], mask_node.inputs["Vector"])
+        split = nodes.new("ShaderNodeSeparateColor")
+        split.location = (-900, 160)
+        links.new(mask_node.outputs["Color"], split.inputs[0])
+        vertex = nodes.new("ShaderNodeVertexColor")
+        vertex.location = (-900, 0)
+        factor = split.outputs[0]
+        for operation, value, location in (
+            ("MULTIPLY", None, -700),
+            ("MULTIPLY", 1.0 + _float_public_param(submaterial, "BlendFactor"), -540),
+            ("POWER", _float_public_param(submaterial, "BlendFalloff") or 1.0, -380),
+        ):
+            math = nodes.new("ShaderNodeMath")
+            math.operation = operation
+            math.use_clamp = operation == "POWER"
+            math.location = (location, 160)
+            links.new(factor, math.inputs[0])
+            if value is None:
+                links.new(vertex.outputs["Alpha"], math.inputs[1])
+            else:
+                math.inputs[1].default_value = value
+            factor = math.outputs[0]
+        return factor
+
     def _build_illum_material(
         self,
         material: bpy.types.Material,
@@ -1614,6 +1655,16 @@ class BuildersMixin:
         blend_mask_socket = blend_mask_node.outputs[0] if blend_mask_node is not None else None
 
         material_channel = submaterial.palette_routing.material_channel.name if submaterial.palette_routing.material_channel is not None else None
+        # Legacy Illum without any tint palette (the Holoviewer_Ships models of
+        # concepts): the colour is the authored Diffuse on the primary layer
+        # and BlendLayer2DiffuseColor on the blend layer, as CryEngine's old
+        # Illum multiplied them into the diffuse maps.
+        legacy_tints = palette is None and material_channel is None
+        primary_tint = _authored_attribute_triplet(submaterial, "Diffuse") if legacy_tints else None
+        secondary_tint = _public_param_triplet(submaterial, "BlendLayer2DiffuseColor") if legacy_tints else None
+        # ...and blended a surface with Opacity below 1 by its diffuse alpha
+        # (the Kraken logo: white RGB, the emblem only in alpha).
+        legacy_alpha = legacy_tints and 0.0 < _float_authored_attribute(submaterial, "Opacity") < 1.0 - 1e-4
 
         primary_color_node = self._image_node(
             nodes,
@@ -1661,7 +1712,7 @@ class BuildersMixin:
                 submaterial,
                 (
                     (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
-                    if plan.uses_alpha
+                    if plan.uses_alpha or legacy_alpha
                     else None
                 ),
                 x=-460,
@@ -1673,7 +1724,7 @@ class BuildersMixin:
             detail_diffuse_strength=0.35,
             detail_gloss_strength=0.35,
             detail_bump_strength=0.15,
-            tint_color=None,
+            tint_color=primary_tint,
             palette=palette,
             palette_channel_name=material_channel,
             palette_finish_channel_name=material_channel,
@@ -1689,7 +1740,7 @@ class BuildersMixin:
             label="Primary Layer",
         )
         
-        if material_channel is None:
+        if material_channel is None and not legacy_tints:
             for node in reversed(nodes):
                 if node.type == 'GROUP' and 'LayerSurface' in node.node_tree.name:
                     palette_socket = _input_socket(node, "Palette Color")
@@ -1739,7 +1790,7 @@ class BuildersMixin:
                 detail_diffuse_strength=0.35,
                 detail_gloss_strength=0.35,
                 detail_bump_strength=0.15,
-                tint_color=None,
+                tint_color=secondary_tint,
                 palette=palette,
                 palette_channel_name=material_channel,
                 palette_finish_channel_name=material_channel,
@@ -1790,6 +1841,8 @@ class BuildersMixin:
             self._link_group_input(links, secondary.roughness, shader_group, "Secondary Roughness")
             self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
             self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
+        if legacy_tints and blend_mask_socket is None and secondary.color is not None:
+            blend_mask_socket = self._legacy_blend_layer_mask(nodes, links, submaterial)
         self._link_group_input(links, blend_mask_socket, shader_group, "Blend Mask")
         if plan.template_key == "parallax_pom":
             self._link_group_input(links, height_primary, shader_group, "Primary Height")
