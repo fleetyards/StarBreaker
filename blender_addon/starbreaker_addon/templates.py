@@ -89,6 +89,19 @@ def _authored_float(submaterial: SubmaterialRecord, name: str) -> float | None:
     return None
 
 
+def _blends_by_opacity_map(submaterial: SubmaterialRecord) -> bool:
+    """``%DECAL_OPACITY_MAP`` without ``%DECAL``, under full ``Opacity``.
+
+    The diffuse alpha is then the decal's opacity: the 600i's ``decal``
+    sheets (Opacity 0.99) drew their whole square without it. At Opacity 1
+    (the Starfarer's ``glows``) CryEngine draws the surface opaque.
+    """
+    if "DECAL_OPACITY_MAP" not in {token.upper() for token in submaterial.decoded_feature_flags.tokens}:
+        return False
+    opacity = _authored_float(submaterial, "Opacity")
+    return opacity is not None and opacity < 1.0 - 1e-4
+
+
 def _is_opaque_surface(submaterial: SubmaterialRecord) -> bool:
     """Non-decal surface with no alpha test and full ``Opacity``.
 
@@ -143,6 +156,8 @@ def _base_template_plan(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     if family == "GlassPBR":
         return MaterialTemplatePlan("physical_surface", "Physical Surface", "BLEND", "HASHED", True, True, False, True, False, True)
     if family == "Illum":
+        if _blends_by_opacity_map(submaterial):
+            return MaterialTemplatePlan("physical_surface", "Physical Surface", "BLEND", "NONE", True, True, False, False, True, True)
         return MaterialTemplatePlan("physical_surface", "Physical Surface", "OPAQUE", "OPAQUE", True, True, False, False, True, False)
     return MaterialTemplatePlan("physical_surface", "Physical Surface", "OPAQUE", "OPAQUE", True, True, False, False, False, False)
 

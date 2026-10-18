@@ -74,6 +74,18 @@ class AlphaTestTests(unittest.TestCase):
         for submaterial in (pom_decal, mesh_decal, stencil):
             self.assertIsNone(alpha_test_threshold(submaterial))
 
+    def test_decal_opacity_map_blends_under_full_opacity(self) -> None:
+        # 600i `decal` sheets (Opacity 0.99) drew their whole square; the
+        # Starfarer's `glows` (Opacity 1) stay opaque.
+        sheet = _submaterial("Illum", "%NORMAL_MAP%SPECULAR_MAP%VERTCOLORS%DECAL_OPACITY_MAP", None)
+        sheet.raw["authored_attributes"].append({"name": "Opacity", "value": "0.99000001"})
+        plan = template_plan_for_submaterial(sheet)
+        self.assertEqual(plan.blend_method, "BLEND")
+        self.assertTrue(plan.uses_alpha)
+        glows = _submaterial("Illum", "%DECAL_OPACITY_MAP", None)
+        glows.raw["authored_attributes"].append({"name": "Opacity", "value": "1"})
+        self.assertFalse(template_plan_for_submaterial(glows).uses_alpha)
+
     def test_missing_or_malformed_alpha_test_is_ignored(self) -> None:
         self.assertIsNone(alpha_test_threshold(_submaterial("Illum", _GRATE_MASK, None)))
         self.assertIsNone(alpha_test_threshold(_submaterial("Illum", _GRATE_MASK, "n/a")))
