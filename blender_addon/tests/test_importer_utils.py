@@ -326,6 +326,31 @@ class TestMeshDecalEmissionStrength(unittest.TestCase):
         )
         self.assertAlmostEqual(_mesh_decal_authored_emission_strength(unlinked), 0.25)
 
+    def test_relief_panel_decal_glow_is_ignored(self) -> None:
+        def decal(gen_mask: str) -> SubmaterialRecord:
+            return SubmaterialRecord.from_value(
+                {
+                    "shader_family": "MeshDecal",
+                    "authored_attributes": [
+                        {"name": "StringGenMask", "value": gen_mask},
+                        {"name": "Glow", "value": "0.25"},
+                    ],
+                }
+            )
+
+        self.assertEqual(
+            _mesh_decal_authored_emission_strength(
+                decal("%DIFFUSE_MAP%VERTDATA%PARALLAX_OCCLUSION_MAPPING%USE_DAMAGE_MAP")
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            _mesh_decal_authored_emission_strength(
+                decal("%DIFFUSE_MAP%VERTCOLORS%PARALLAX_OCCLUSION_MAPPING")
+            ),
+            0.25,
+        )
+
     def test_mesh_decal_emissive_texture_still_emits(self) -> None:
         decal = SubmaterialRecord.from_value({"shader_family": "MeshDecal"})
         self.assertEqual(

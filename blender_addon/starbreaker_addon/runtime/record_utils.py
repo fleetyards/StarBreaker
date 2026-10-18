@@ -330,6 +330,12 @@ def _mesh_decal_authored_emission_strength(
     emissive_texture_path: str | None = None,
 ) -> float:
     glow_value = _float_authored_attribute(submaterial, "Glow")
+    string_gen_mask = (_authored_attribute_string(submaterial, "StringGenMask") or "").upper()
+    if "PARALLAX_OCCLUSION_MAPPING" in string_gen_mask and "VERTCOLORS" not in string_gen_mask:
+        # Relief panel atlases (Polaris/Paladin ``Decal_POM``) author a Glow the
+        # game never shows; lit decals (Ironclad ``Glow_Headlights``) carry
+        # vertex colours. Emitting the grey atlas renders the panels white.
+        glow_value = 0.0
     if glow_value > 0.0:
         return glow_value
     if emissive_texture_path:

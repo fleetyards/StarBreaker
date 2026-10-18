@@ -992,6 +992,15 @@ class BuildersMixin:
                         and param_key == "decaldiffuseopacity"
                     ):
                         resolved = _resolve_public_param_default(submaterial, "stencilopacity")
+                    if (
+                        group_contract.name == "SB_MeshDecal_v1"
+                        and param_key == "decalfalloff"
+                        and isinstance(resolved, (int, float))
+                    ):
+                        # The template multiplies alpha by DecalFalloff, but it is the
+                        # game's angle falloff, not an opacity: Polaris Decal_Dirt (128)
+                        # turned faint dirt runs into opaque black rectangles.
+                        resolved = min(float(resolved), 1.0)
                     if resolved is not None:
                         try:
                             target_socket.default_value = resolved
