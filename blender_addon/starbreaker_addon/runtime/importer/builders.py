@@ -1720,6 +1720,26 @@ class BuildersMixin:
             (_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0) if material_channel is not None else 0.0
         )
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
+        primary_alpha_source = (
+            (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
+            if plan.uses_alpha or legacy_alpha
+            else None
+        )
+        # A blended decal draws at its authored Opacity: the Mk V's engine
+        # pulse overlay (0.15) covered the thrusters in solid colour.
+        decal_opacity = _float_authored_attribute(submaterial, "Opacity")
+        if (
+            primary_alpha_source is not None
+            and submaterial.decoded_feature_flags.has_decal
+            and 0.0 < decal_opacity < 1.0 - 1e-4
+        ):
+            scale = nodes.new("ShaderNodeMath")
+            scale.operation = "MULTIPLY"
+            scale.label = "Decal Opacity"
+            scale.location = (-620, 380)
+            links.new(primary_alpha_source, scale.inputs[0])
+            scale.inputs[1].default_value = decal_opacity
+            primary_alpha_source = scale.outputs[0]
         primary = self._connect_layer_surface_group(
             nodes,
             links,
@@ -1728,11 +1748,7 @@ class BuildersMixin:
                 nodes,
                 links,
                 submaterial,
-                (
-                    (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
-                    if plan.uses_alpha or legacy_alpha
-                    else None
-                ),
+                primary_alpha_source,
                 x=-460,
                 y=380,
             ),
@@ -1763,7 +1779,17 @@ class BuildersMixin:
                 if node.type == 'GROUP' and 'LayerSurface' in node.node_tree.name:
                     palette_socket = _input_socket(node, "Palette Color")
                     if palette_socket is not None:
-                        palette_socket.default_value = (0.0, 0.0, 0.0, 1.0)
+                        # No palette channel: the authored Diffuse tints the
+                        # texture (the Spartan's tyres, the F8C's rockets were
+                        # black). Glows and decals stay dark: unlit, the Mk V's
+                        # glow trims would print as flat blue paint.
+                        unlit = (
+                            (_float_authored_attribute(submaterial, "Glow") or 0.0) <= 0.0
+                            and "glow" not in submaterial.submaterial_name.lower()
+                            and not submaterial.decoded_feature_flags.has_decal
+                        )
+                        diffuse = _authored_attribute_triplet(submaterial, "Diffuse") if unlit else None
+                        palette_socket.default_value = (*diffuse, 1.0) if diffuse is not None else ((1.0, 1.0, 1.0, 1.0) if unlit else (0.0, 0.0, 0.0, 1.0))
                     break
 
         secondary_color_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot9",), roles=("alternate_base_color", "base_color", "diffuse"))
