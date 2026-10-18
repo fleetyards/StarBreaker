@@ -504,3 +504,58 @@ pub(crate) fn path_is_shield_related(path: Option<&str>) -> bool {
     path.is_some_and(|value| value.to_ascii_lowercase().contains("/shields/"))
         || path.is_some_and(|value| value.to_ascii_lowercase().contains("\\shields\\"))
 }
+
+/// Decomposed export of a bare geometry file with its material, no DataCore
+/// record: no loadout, palette, gear or interior. For models no entity
+/// places, such as the `Holoviewer_Ships` ships of concepts.
+pub fn export_geometry_decomposed(
+    p4k: &MappedP4k,
+    entity_name: &str,
+    geometry_path: &str,
+    material_path: &str,
+    opts: &ExportOptions,
+    existing_asset_paths: Option<&HashSet<String>>,
+    existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
+) -> Result<ExportResult, Error> {
+    ensure_supported_export_options(opts)?;
+    let payload_opts = ExportOptions {
+        material_mode: MaterialMode::Colors,
+        ..opts.clone()
+    };
+    let (root_mesh, root_mtl, _, root_nmc, _, geometry_path, material_path, root_bones, root_skeleton_source_path) =
+        export_entity_from_paths(p4k, geometry_path, material_path, &payload_opts)?;
+    let decomposed_input = crate::decomposed::DecomposedInput {
+        entity_name: entity_name.to_string(),
+        geometry_path: geometry_path.clone(),
+        material_path: material_path.clone(),
+        root_mesh,
+        root_materials: root_mtl,
+        root_nmc,
+        root_palette: None,
+        available_palettes: Vec::new(),
+        root_bones,
+        root_skeleton_source_path,
+        root_animation_controller: None,
+        children: Vec::new(),
+        nested_vehicle_names: HashSet::new(),
+        interiors: LoadedInteriors::default(),
+        paint_variants: Vec::new(),
+    };
+    let decomposed = crate::pipeline::write_decomposed_export_blend(
+        p4k,
+        decomposed_input,
+        opts,
+        None,
+        existing_asset_paths,
+        None,
+        existing_asset_loader,
+    )?;
+    Ok(ExportResult {
+        kind: opts.kind,
+        format: opts.format,
+        glb: Vec::new(),
+        decomposed: Some(decomposed),
+        geometry_path,
+        material_path,
+    })
+}

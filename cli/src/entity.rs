@@ -412,6 +412,13 @@ pub enum EntityCommand {
         /// Write hierarchy JSON instead of GLB
         #[arg(long)]
         dump_hierarchy: bool,
+        /// Export this geometry file (P4k path, e.g. a Holoviewer_Ships .cgf)
+        /// as a decomposed package named NAME instead of an entity's
+        #[arg(long)]
+        geometry: Option<String>,
+        /// Material file for --geometry
+        #[arg(long, requires = "geometry")]
+        material: Option<String>,
         #[command(flatten)]
         opts: ExportOpts,
     },
@@ -432,8 +439,18 @@ impl EntityCommand {
                 name,
                 output,
                 p4k,
+                dump_hierarchy: _,
+                geometry: Some(geometry),
+                material,
+                opts,
+            } => export_geometry(name, output, p4k, geometry, material.unwrap_or_default(), opts),
+            Self::Export {
+                name,
+                output,
+                p4k,
                 dump_hierarchy,
                 opts,
+                ..
             } => export(name, output, p4k, dump_hierarchy, opts),
             Self::Loadout { name, p4k } => loadout(name, p4k),
         }
@@ -584,6 +601,61 @@ fn export(
     }
     crate::log_mem_stats("after write");
     eprintln!("Written to {}", output.display());
+    Ok(())
+}
+
+/// Decomposed package of a bare geometry file and its material (no entity).
+fn export_geometry(
+    name: String,
+    output: Option<PathBuf>,
+    p4k_path: Option<PathBuf>,
+    geometry: String,
+    material: String,
+    opts: ExportOpts,
+) -> Result<()> {
+    let (p4k, _) = load_dcb_bytes(p4k_path.as_deref(), None)?;
+    let p4k = p4k.ok_or_else(|| CliError::MissingRequirement("P4k required for geometry export".into()))?;
+    let mut export_opts = starbreaker_3d::ExportOptions::from(&opts);
+    export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
+    let export_name = sanitize_export_name(&export_entity_name(&name));
+    let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
+    let package_name = decomposed_package_rel_path(&export_name, &export_opts);
+    let existing_asset_paths = if opts.skip_existing_assets {
+        Some(collect_existing_decomposed_assets(&output_dir, &p4k)?)
+    } else {
+        None
+    };
+    prepare_decomposed_output_root(&output_dir, &package_name)?;
+    let existing_asset_loader =
+        |relative_path: &str| existing_asset_paths.as_ref().and_then(|paths| {
+            read_reusable_decomposed_asset(&output_dir, paths, relative_path)
+        });
+    let result = starbreaker_3d::export_geometry_decomposed(
+        &p4k,
+        &name,
+        &geometry,
+        &material,
+        &export_opts,
+        existing_asset_paths.as_ref(),
+        Some(&existing_asset_loader),
+    )?;
+    let decomposed = result
+        .decomposed
+        .as_ref()
+        .ok_or_else(|| CliError::InvalidInput("geometry export returned no decomposed files".into()))?;
+    for file in &decomposed.files {
+        let output_path = output_dir.join(&file.relative_path);
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| CliError::IoPath {
+                source: e,
+                path: parent.display().to_string(),
+            })?;
+        }
+        write_decomposed_file(file, &output_path, opts.skip_existing_assets, &p4k)?;
+    }
+    eprintln!("Geometry: {}", result.geometry_path);
+    eprintln!("Material: {}", result.material_path);
+    eprintln!("Written to {}", output_dir.display());
     Ok(())
 }
 

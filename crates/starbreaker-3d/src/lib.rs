@@ -20,7 +20,7 @@ pub use included_objects::{IncludedObject, IncludedObjects};
 pub use pipeline::{
     DecomposedExport, ExportFormat, ExportKind, ExportOptions, ExportResult, ExportedFile,
     ExportedFileKind, MaterialMode,
-    assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress,
+    assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress, export_geometry_decomposed,
     dump_hierarchy, load_invisible_ports, query_animation_controller_source,
     resolve_loadout_meshes, socpaks_to_glb,
 };

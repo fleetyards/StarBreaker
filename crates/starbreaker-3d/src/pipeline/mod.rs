@@ -39,7 +39,7 @@ pub use self::palette::*;
 mod vehicle;
 pub use self::vehicle::*;
 mod glb_assembly;
-pub use self::glb_assembly::{assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress};
+pub use self::glb_assembly::{assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress, export_geometry_decomposed};
 pub(crate) use self::glb_assembly::path_is_shield_related;
 mod blend_assembly;
 pub use self::blend_assembly::write_decomposed_export_blend;
