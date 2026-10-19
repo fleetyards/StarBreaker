@@ -1071,6 +1071,7 @@ fn extract_loadout_from_value<'v, 'a>(entity_val: &'v Value<'a>) -> Option<&'v V
 /// Collect the children of `record`'s own `SEntityComponentDefaultLoadoutParams`.
 /// Each child entity's loadout is small, so this Value query is cheap.
 fn collect_default_loadout(idx: &EntityIndex, record: &Record, out: &mut Vec<LoadoutNode>, depth: usize) {
+    let mut listed = HashSet::new();
     if let Ok(compiled) = idx.db.compile_path::<Value>(
         record.struct_id(),
         "Components[SEntityComponentDefaultLoadoutParams]",
@@ -1078,11 +1079,86 @@ fn collect_default_loadout(idx: &EntityIndex, record: &Record, out: &mut Vec<Loa
     {
         for component in &components {
             if let Some(loadout) = get_object_field(component, "loadout") {
+                for entry in get_array_field(loadout, "entries").into_iter().flatten() {
+                    if let Some(port) = get_string_field(entry, "itemPortName") {
+                        listed.insert(port.to_ascii_lowercase());
+                    }
+                }
                 collect_entries_recursive(idx, loadout, out, depth);
             }
         }
     }
+    collect_port_default_items(idx, record, &listed, out, depth);
 }
+
+/// Mount the `defaultItem` of `record`'s own item ports that its loadout
+/// leaves out. The Clipper's thrusters carry their nozzle petals this way
+/// (`hardpoint_fin_*` -> `DRAK_Clipper_Thruster_Fin_*`), on no loadout at all,
+/// so the engines exported as bare cores. A port the loadout names, even
+/// empty, keeps what the loadout says.
+fn collect_port_default_items(
+    idx: &EntityIndex,
+    record: &Record,
+    listed: &HashSet<String>,
+    out: &mut Vec<LoadoutNode>,
+    depth: usize,
+) {
+    if depth >= MAX_LOADOUT_DEPTH {
+        return;
+    }
+    let Ok(compiled) = idx.db.compile_path::<Value>(
+        record.struct_id(),
+        "Components[SItemPortContainerComponentParams]",
+    ) else {
+        return;
+    };
+    let Ok(components) = idx.db.query_no_references(&compiled, record) else {
+        return;
+    };
+    for component in &components {
+        for port in get_array_field(component, "Ports").into_iter().flatten() {
+            let Some(port_name) = get_string_field(port, "Name").filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            let key = port_name.to_ascii_lowercase();
+            if listed.contains(&key) || out.iter().any(|n| n.item_port_name.eq_ignore_ascii_case(port_name)) {
+                continue;
+            }
+            let default_item = get_object_field(port, "defaultItem");
+            let guid = default_item.and_then(|d| get_guid_field(d, "entityClass")).or_else(|| {
+                default_item.and_then(|d| get_object_field(d, "entityClass")).and_then(get_record_id)
+            });
+            let Some(guid) = guid else {
+                continue;
+            };
+            let Some(item) = idx.db.record_by_id(&guid) else {
+                continue;
+            };
+            let full_name = idx.db.resolve_string2(item.name_offset);
+            let name = full_name.rsplit('.').next().unwrap_or(full_name).to_owned();
+            let (geometry_path, material_path) = idx.query_geometry_paths(item);
+            log::debug!("loadout: {port_name} -> {name} (port default item)");
+            let mut children = Vec::new();
+            collect_default_loadout(idx, item, &mut children, depth + 1);
+            out.push(LoadoutNode {
+                record: *item,
+                entity_name: name,
+                item_port_name: port_name.to_owned(),
+                helper_bone_name: None,
+                no_rotation: false,
+                offset_position: [0.0; 3],
+                offset_rotation: [0.0; 3],
+                detach_direction: [0.0; 3],
+                port_flags: String::new(),
+                port_tags: String::new(),
+                geometry_path,
+                material_path,
+                children,
+            });
+        }
+    }
+}
+
 
 /// Walk a loadout Value tree recursively, collecting LoadoutNodes.
 /// The `loadout_value` is a SItemPortLoadoutManualParams with an `entries` array.
