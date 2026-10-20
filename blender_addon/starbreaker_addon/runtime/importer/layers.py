@@ -575,6 +575,70 @@ class LayersMixin:
             tone_mode=tint_override if tint_override > 0.0 else (1.0 if stencil_ref.is_virtual else 0.0),
         )
 
+    def _link_hard_surface_stencil_paint(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        submaterial: SubmaterialRecord,
+        stencil: Any,
+        *,
+        x: int,
+        y: int,
+    ) -> None:
+        """Paint a HardSurface ``STENCIL_MAP`` into the primary layer's colour.
+
+        A stencil without a tint override (``StencilTintOverride`` 0, not a
+        virtual tint-palette source) is a paint pattern: its mask's channels
+        are nested -- blue covers green covers red -- and pick
+        StencilDiffuseColor3, 2 and 1 in that order, which take the place of
+        the palette tint under the layer's own diffuse. The TMBL Nova's
+        default woodland camo (camo_stencil_03_mask: tan, green, dark green)
+        came out as the bare near-black palette without it.
+        """
+        if stencil.color is None or stencil.tone_mode > 0.0:
+            return
+        opacity = _optional_float_public_param(submaterial, "StencilOpacity")
+        if opacity is not None and opacity <= 0.0:
+            return
+        layer = next(
+            (n for n in nodes if n.type == "GROUP" and n.label == "Primary Layer" and _input_socket(n, "Palette Color") is not None),
+            None,
+        )
+        if layer is None:
+            return
+        target = _input_socket(layer, "Palette Color")
+        original = target.links[0].from_socket if target.is_linked else None
+
+        channels = nodes.new("ShaderNodeSeparateColor")
+        channels.location = (x - 400, y)
+        links.new(stencil.color, channels.inputs[0])
+        current = original
+        current_default = tuple(target.default_value)
+        for index, (channel, color) in enumerate(
+            ((2, stencil.stencil_diffuse_color_3), (1, stencil.stencil_diffuse_color_2), (0, stencil.stencil_diffuse_color))
+        ):
+            mix = nodes.new("ShaderNodeMixRGB")
+            mix.location = (x - 200 + index * 160, y)
+            mix.blend_type = "MIX"
+            links.new(channels.outputs[channel], mix.inputs[0])
+            if current is not None:
+                links.new(current, mix.inputs[1])
+            else:
+                mix.inputs[1].default_value = current_default
+            mix.inputs[2].default_value = (*color, 1.0)
+            current = mix.outputs[0]
+        if opacity is not None and opacity < 1.0:
+            blend = nodes.new("ShaderNodeMixRGB")
+            blend.location = (x + 300, y)
+            blend.inputs[0].default_value = opacity
+            if original is not None:
+                links.new(original, blend.inputs[1])
+            else:
+                blend.inputs[1].default_value = current_default
+            links.new(current, blend.inputs[2])
+            current = blend.outputs[0]
+        links.new(current, target)
+
     # ------------------------------------------------------------------
     # Wear / damage / iridescence / angle factor sockets
     # ------------------------------------------------------------------
