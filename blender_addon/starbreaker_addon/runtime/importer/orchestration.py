@@ -242,6 +242,53 @@ class OrchestrationMixin:
         self.sidecar_submaterials_by_name_all[cache_key] = grouped
         return grouped
 
+    def _authored_file_index(self, slot_name: str, sidecar_path: str) -> int | None:
+        """Index of a slot's submaterial in the material file its mesh was authored with.
+
+        A paint's file can rename a submaterial at the same position: the
+        Vanguard Sentinel's vanguard_ext_b calls ext_a's ext_paint_dark
+        ext_paint_tertiary_b. The slot names carry the authored file
+        (`vanguard_ext_a_mtl_ext_paint_dark_09`); its position there is the
+        position in the paint's file. Without it the slot fell back to its
+        own index and the Sentinel's fins and wings got glass_canopy.
+        """
+        name = slot_name
+        if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
+            name = name[:-4]
+        if "_mtl_" not in name:
+            return None
+        stem = name.rsplit("_mtl_", 1)[0]
+        canonical = _canonical_source_name(slot_name)
+        folder, _, filename = sidecar_path.replace("\\", "/").rpartition("/")
+        suffix = filename[filename.find("_TEX"):] if "_TEX" in filename else "_TEX0.materials.json"
+        authored_path = "%s/%s%s" % (folder, stem, suffix) if folder else stem + suffix
+        if authored_path.lower() == sidecar_path.replace("\\", "/").lower():
+            return None
+        try:
+            authored = self.package.load_material_sidecar(authored_path)
+        except Exception:
+            authored = None
+        if authored is None:
+            return None
+        matches = [sub for sub in authored.submaterials if sub.submaterial_name.strip() == canonical]
+        if len(matches) != 1:
+            return None
+        # Only a positional twin of the authored file may be read by position:
+        # same layout, nearly every name unchanged, a real name at the slot.
+        try:
+            target = self.package.load_material_sidecar(sidecar_path)
+        except Exception:
+            target = None
+        if target is None or len(target.submaterials) != len(authored.submaterials):
+            return None
+        target_names = {sub.index: sub.submaterial_name.strip() for sub in target.submaterials}
+        same = sum(1 for sub in authored.submaterials if target_names.get(sub.index) == sub.submaterial_name.strip())
+        if same < 0.9 * len(authored.submaterials):
+            return None
+        if target_names.get(matches[0].index, "").strip("-") == "":
+            return None
+        return matches[0].index
+
     def _slot_submaterials_for_object(
         self,
         obj: bpy.types.Object,
@@ -492,7 +539,10 @@ class OrchestrationMixin:
                                 key=lambda item: abs(item.index - len(inferred_slot_mapping)),
                             )
                     if matched_submaterial is None:
-                        inferred_slot_mapping.append(None)
+                        authored_index = self._authored_file_index(slot_material.name, sidecar_path)
+                        inferred_slot_mapping.append(authored_index)
+                        if authored_index is not None:
+                            inferred_matches += 1
                         continue
                     inferred_slot_mapping.append(matched_submaterial.index)
                     inferred_matches += 1
@@ -519,7 +569,10 @@ class OrchestrationMixin:
                             key=lambda item: abs(item.index - slot_index),
                         )
                 if matched_submaterial is None:
-                    inferred_slot_mapping.append(None)
+                    authored_index = self._authored_file_index(slot_material.name, sidecar_path)
+                    inferred_slot_mapping.append(authored_index)
+                    if authored_index is not None:
+                        inferred_matches += 1
                     continue
                 inferred_slot_mapping.append(matched_submaterial.index)
                 inferred_matches += 1
