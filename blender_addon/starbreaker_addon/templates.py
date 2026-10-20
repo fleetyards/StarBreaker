@@ -129,6 +129,23 @@ def template_plan_for_submaterial(submaterial: SubmaterialRecord) -> MaterialTem
     return plan
 
 
+def _is_switched_off_decal(submaterial: SubmaterialRecord) -> bool:
+    """A %DECAL submaterial with no authored Opacity, which the game does not draw.
+
+    Variants sharing a hull keep each other's decal slots switched off this
+    way: the Cutlass Red's and Blue's `livery_decal` (the Black's pirate
+    skull), the base Cyclone's `livery_export` (the RC's sponsor logos), the
+    Hammerhead's Ship Showdown `custom_decal`, the Mustang Alpha's
+    `racing_decals`.
+    """
+    if not submaterial.decoded_feature_flags.has_decal:
+        return False
+    attributes = submaterial.raw.get("authored_attributes") if isinstance(submaterial.raw, dict) else None
+    if not isinstance(attributes, list):
+        return False
+    return not any(isinstance(item, dict) and item.get("name") == "Opacity" for item in attributes)
+
+
 def _base_template_plan(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     family = submaterial.shader_family
     flags = submaterial.decoded_feature_flags
@@ -136,6 +153,8 @@ def _base_template_plan(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     if family == "NoDraw":
         return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
     if _is_empty_livery_decal(submaterial):
+        return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
+    if _is_switched_off_decal(submaterial):
         return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
     if submaterial.activation_state != "active" and not _uses_decal_or_stencil_template(submaterial):
         return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
