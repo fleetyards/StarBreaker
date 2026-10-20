@@ -96,13 +96,6 @@ fn node_mesh_combo_from_bones(bones: &[crate::skeleton::Bone]) -> Option<crate::
     }
 
     let world_transforms = bones.iter().map(bone_world_transform).collect::<Vec<_>>();
-    let root_index = bones
-        .iter()
-        .enumerate()
-        .find(|(index, bone)| bone.parent_index.is_none() || bone.parent_index == Some(*index as u16))
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    let root_inv = world_transforms[root_index].inverse();
     let nodes = bones
         .iter()
         .enumerate()
@@ -121,7 +114,14 @@ fn node_mesh_combo_from_bones(bones: &[crate::skeleton::Bone]) -> Option<crate::
                     glam::Vec3::from_array(bone.local_position),
                 )
             } else {
-                root_inv * world_transforms[index]
+                // The root keeps its rest offset from the model origin: the
+                // character's origin goes to the attachment point and the
+                // bones stand at their model-space positions. Composing with
+                // its own inverse put the DRAK Corsair's gear root (rest
+                // 0, -0.57, 0.68) on the hardpoint, the whole leg 0.68 m low,
+                // and the stowed feet through the closed doors; the addon then
+                // rejected the CAF's root position keys as too far from bind.
+                world_transforms[index]
             };
             crate::nmc::NmcNode {
                 name: bone.name.clone(),

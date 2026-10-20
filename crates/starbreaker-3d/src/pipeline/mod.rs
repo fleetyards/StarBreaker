@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_skin_nmc_uses_root_relative_bone_transforms() {
+    fn synthetic_skin_nmc_keeps_root_rest_offset_and_parent_relative_bones() {
         let mesh = sample_mesh(&[0, 1]);
         let bones = vec![
             sample_bone("root", None, [2.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
@@ -728,7 +728,7 @@ mod tests {
         assert_eq!(nmc.nodes[0].name, "root");
         assert_eq!(nmc.nodes[1].name, "foot");
         assert_eq!(nmc.nodes[1].parent_index, Some(0));
-        assert_eq!(nmc.nodes[0].bone_to_world[0][3], 0.0);
+        assert_eq!(nmc.nodes[0].bone_to_world[0][3], 2.0);
         assert_eq!(nmc.nodes[0].bone_to_world[1][3], 0.0);
         assert_eq!(nmc.nodes[0].bone_to_world[2][3], 0.0);
         assert_eq!(nmc.nodes[1].bone_to_world[0][3], 1.5);
