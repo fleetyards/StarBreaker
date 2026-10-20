@@ -173,6 +173,25 @@ class LayersMixin:
         # its nozzles rendering white). It gets a dielectric's 0.04.
         if layer_channel_name is None and metallic_value < 0.5 and specular_value >= 0.99:
             specular_value = 0.04
+        # On a metal layer the sentinel stands for the layer's spec map
+        # (TexSlot6, *_spec*): its colour is the metal's F0. Read as (1,1,1)
+        # every worn edge and trim was chrome -- the Clipper's glow trims,
+        # the Javelin's exhausts.
+        specular_map_socket = None
+        if metallic_value >= 0.5 and specular_color is not None and min(specular_color) >= 0.99:
+            spec_ref = _layer_texture_reference(layer, slots=("TexSlot6",))
+            spec_path = spec_ref.export_path if spec_ref is not None else None
+            if spec_path and "_spec" in spec_path.rsplit("/", 1)[-1].lower():
+                # Shared with Non-Color users of the same file; decode the sRGB here.
+                spec_node = self._image_node(nodes, spec_path, x=x, y=y - 860, is_color=False)
+                if spec_node is not None:
+                    self._apply_uv_tiling(nodes, links, spec_node, uv_tile, x=x - 320, y=y - 860)
+                    decode = nodes.new("ShaderNodeGamma")
+                    decode.location = (x + 180, y - 860)
+                    decode.label = "Spec sRGB"
+                    decode.inputs[1].default_value = 2.2
+                    links.new(spec_node.outputs[0], decode.inputs[0])
+                    specular_map_socket = decode.outputs[0]
         # A layer without a palette channel (PaletteTint 0) takes no palette
         # finish either: palette_finish_* fall back to the primary channel for
         # a missing name, which added the primary's specular on top of the
@@ -217,6 +236,7 @@ class LayersMixin:
             palette_specular_value=palette_specular_value,
             metallic_value=metallic_value,
             specular_color=specular_color,
+            specular_color_socket=specular_map_socket,
             x=x + 420,
             y=y - 120,
             label=label,
@@ -246,6 +266,7 @@ class LayersMixin:
         specular_color: tuple[float, float, float] | None,
         specular_socket: Any = None,
         metallic_socket: Any = None,
+        specular_color_socket: Any = None,
         x: int,
         y: int,
         label: str,
@@ -327,6 +348,7 @@ class LayersMixin:
         self._link_group_input(links, roughness_socket, group_node, "Roughness Source")
         self._link_group_input(links, specular_socket, group_node, "Specular Value")
         self._link_group_input(links, metallic_socket, group_node, "Metallic")
+        self._link_group_input(links, specular_color_socket, group_node, "Specular Color")
         self._link_group_input(links, palette_color_socket, group_node, "Palette Color")
         self._link_group_input(links, palette_gloss_socket, group_node, "Palette Glossiness")
         self._link_group_input(links, palette_specular_socket, group_node, "Palette Specular")
