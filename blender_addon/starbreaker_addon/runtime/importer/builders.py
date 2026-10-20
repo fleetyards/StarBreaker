@@ -1728,6 +1728,14 @@ class BuildersMixin:
         # A blended decal draws at its authored Opacity: the Mk V's engine
         # pulse overlay (0.15) covered the thrusters in solid colour.
         decal_opacity = _float_authored_attribute(submaterial, "Opacity")
+        # %DECAL also scales by DecalDiffuseOpacity and DecalAlphaMult: the
+        # Valkyrie's leak runs (0.5 x 0.5) were drawn as solid dirt. An
+        # opacity of 0 marks a normal/POM-only decal, which keeps its host
+        # colour here; a multiplier above 1 only saturates in game.
+        diffuse_opacity = _optional_float_public_param(submaterial, "DecalDiffuseOpacity")
+        if submaterial.decoded_feature_flags.has_decal and diffuse_opacity is not None and diffuse_opacity > 0.0:
+            alpha_mult = _optional_float_public_param(submaterial, "DecalAlphaMult")
+            decal_opacity = (decal_opacity if decal_opacity > 0.0 else 1.0) * min(1.0, diffuse_opacity) * (min(1.0, alpha_mult) if alpha_mult is not None and alpha_mult > 0.0 else 1.0)
         if (
             primary_alpha_source is not None
             and submaterial.decoded_feature_flags.has_decal
