@@ -2419,7 +2419,7 @@ class GroupsMixin:
     def _ensure_runtime_illum_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime Illum",
-            "illum_v6",
+            "illum_v7",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -2431,7 +2431,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime Illum",
-            signature="illum_v6",
+            signature="illum_v7",
             inputs=[
                 ("Primary Color", "NodeSocketColor"),
                 ("Primary Alpha", "NodeSocketFloat"),
@@ -2449,10 +2449,11 @@ class GroupsMixin:
                 ("POM Strength", "NodeSocketFloat"),
                 ("Emission Color", "NodeSocketColor"),
                 ("Emission Strength", "NodeSocketFloat"),
+                ("Primary Metallic", "NodeSocketFloat"),
             ],
             outputs=[("Shader", "NodeSocketShader")],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "illum_v6":
+        if group_tree.get("starbreaker_runtime_built_signature") == "illum_v7":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -2515,6 +2516,8 @@ class GroupsMixin:
         links.new(color_mix.outputs[0], _input_socket(principled, "Base Color"))
         links.new(alpha_mix.outputs[0], _input_socket(principled, "Alpha"))
         links.new(roughness_mix.outputs[0], _input_socket(principled, "Roughness"))
+        # A coloured F0 (the 600i Executive's gold) is a metal; 0 elsewhere.
+        links.new(_output_socket(group_input, "Primary Metallic"), _input_socket(principled, "Metallic"))
         self._link_reflectance_to_principled(nodes, links, principled, specular_mix.outputs[0])
         normal_input = _input_socket(principled, "Normal")
         if normal_input is not None:
@@ -2537,7 +2540,7 @@ class GroupsMixin:
         links.new(emission.outputs[0], add_shader.inputs[1])
 
         links.new(add_shader.outputs[0], group_output.inputs["Shader"])
-        group_tree["starbreaker_runtime_built_signature"] = "illum_v6"
+        group_tree["starbreaker_runtime_built_signature"] = "illum_v7"
         return group_tree
 
     def _ensure_runtime_parallax_group(

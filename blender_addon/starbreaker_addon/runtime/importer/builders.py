@@ -180,6 +180,21 @@ def _mesh_decal_neutral_breakup_default(
     return (1.0, 1.0, 1.0, 1.0)
 
 
+def _tinted_specular(submaterial: Any) -> tuple[float, float, float] | None:
+    """An Illum metal's coloured F0 from its authored Specular, else None.
+
+    The 600i Executive Edition's gold trim is accent/grey metals with
+    Specular 0.59,0.27,0.05 over a near-black diffuse; the Cutlasses' engine
+    insulation is the same copper foil. Grey speculars stay on the default.
+    """
+    specular = _authored_attribute_triplet(submaterial, "Specular")
+    if specular is None or max(specular) - min(specular) <= 0.05:
+        return None
+    # Read back as sRGB: as a linear F0 the gold came out dark orange copper,
+    # the game shows it pale champagne.
+    return tuple(c ** (1.0 / 2.2) for c in specular)
+
+
 class BuildersMixin:
     def _apply_uv_tiling(
         self,
@@ -1721,6 +1736,8 @@ class BuildersMixin:
             (_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0) if material_channel is not None else 0.0
         )
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
+        # A coloured F0 is a metal: the layer colour goes to the Specular.
+        tinted_specular = _tinted_specular(submaterial)
         primary_alpha_source = (
             (decal_palette.alpha if decal_palette.alpha is not None else (_output_socket(primary_color_node, "Alpha") if primary_color_node is not None else None))
             if plan.uses_alpha or legacy_alpha
@@ -1774,10 +1791,10 @@ class BuildersMixin:
             palette_glossiness=illum_palette_glossiness,
             specular_value=0.0,
             palette_specular_value=illum_palette_specular,
-            metallic_value=0.0,
-            specular_color=None,
+            metallic_value=1.0 if tinted_specular is not None else 0.0,
+            specular_color=tinted_specular,
             specular_socket=primary_specular,
-            metallic_socket=primary_specular,
+            metallic_socket=None if tinted_specular is not None else primary_specular,
             x=-180,
             y=220,
             label="Primary Layer",
@@ -1882,6 +1899,7 @@ class BuildersMixin:
         self._set_socket_default(_input_socket(shader_group, "POM Strength"), 0.0)
         self._set_socket_default(_input_socket(shader_group, "Emission Color"), (1.0, 1.0, 1.0, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Emission Strength"), self._illum_emission_strength(submaterial))
+        self._set_socket_default(_input_socket(shader_group, "Primary Metallic"), 1.0 if tinted_specular is not None else 0.0)
 
         self._link_group_input(links, primary.color, shader_group, "Primary Color")
         self._link_group_input(links, primary.alpha, shader_group, "Primary Alpha")
