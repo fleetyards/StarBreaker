@@ -623,6 +623,14 @@ pub(crate) fn build_interiors_from_payloads(
                     log::debug!("  entity class {entity_class_name} → skipped automatic door portal helper");
                     continue;
                 }
+                // Item-port names are often instance names that only share the
+                // ship's prefix: the Guardian MX's `mrai_guardian_eng_compbay_door_*`
+                // prefix-matched `MRAI_Guardian`, and 22 whole Guardian hulls were
+                // placed inside the MX. A port never holds a whole vehicle.
+                if is_vehicle_entity(db, record) {
+                    log::debug!("  entity class {entity_class_name} → skipped, resolves to a vehicle");
+                    continue;
+                }
                 match resolve_record_geometry(
                     db,
                     record,
@@ -925,6 +933,15 @@ fn is_automatic_door_portal_entity(db: &Database, record: &Record) -> bool {
             }
         )
     })
+}
+
+fn is_vehicle_entity(db: &Database, record: &Record) -> bool {
+    let Ok(compiled) = db.compile_path::<Value>(record.struct_id(), "Components[VehicleComponentParams]") else {
+        return false;
+    };
+    db.query::<Value>(&compiled, record)
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
 }
 
 /// Walk a loadout subtree, emitting additional `(cgf_idx, transform)` placements
