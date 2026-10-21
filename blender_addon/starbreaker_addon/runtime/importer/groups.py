@@ -511,7 +511,7 @@ class GroupsMixin:
     def _ensure_runtime_layer_surface_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime LayerSurface",
-            "layer_surface_v6",
+            "layer_surface_v7",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -520,7 +520,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime LayerSurface",
-            signature="layer_surface_v6",
+            signature="layer_surface_v7",
             inputs=[
                 ("Base Color", "NodeSocketColor"),
                 ("Base Alpha", "NodeSocketFloat"),
@@ -549,7 +549,7 @@ class GroupsMixin:
                 ("Metallic", "NodeSocketFloat"),
             ],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v6":
+        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v7":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -633,8 +633,8 @@ class GroupsMixin:
         bump = nodes.new("ShaderNodeBump")
         bump.location = (-320, -620)
         links.new(_output_socket(group_input, "Detail Bump Strength"), bump.inputs[0])
-        links.new(_output_socket(group_input, "Detail Height Mask"), bump.inputs[2])
-        links.new(_output_socket(normal_map, "Normal"), bump.inputs[3])
+        links.new(_output_socket(group_input, "Detail Height Mask"), _input_socket(bump, "Height"))
+        links.new(_output_socket(normal_map, "Normal"), _input_socket(bump, "Normal"))
 
         metallic_color_mix = nodes.new("ShaderNodeMixRGB")
         metallic_color_mix.location = (-120, 220)
@@ -646,16 +646,28 @@ class GroupsMixin:
         links.new(metallic_color_mix.outputs[0], group_output.inputs["Color"])
         links.new(_output_socket(group_input, "Base Alpha"), group_output.inputs["Alpha"])
         links.new(roughness.outputs[0], group_output.inputs["Roughness"])
-        links.new(specular.outputs[0], group_output.inputs["Specular"])
+        # The detail colour also scales the reflectance: on a layer whose
+        # colour is all specular (the Banu engraved gold, palette diffuse
+        # black) a diffuse-only detail left the engraving invisible.
+        detail_spec = nodes.new("ShaderNodeMath")
+        detail_spec.location = (-120, -420)
+        detail_spec.operation = "MULTIPLY"
+        detail_spec.use_clamp = True
+        links.new(specular.outputs[0], detail_spec.inputs[0])
+        detail_luma = nodes.new("ShaderNodeRGBToBW")
+        detail_luma.location = (-320, -520)
+        links.new(detail_mix.outputs[0], detail_luma.inputs[0])
+        links.new(detail_luma.outputs[0], detail_spec.inputs[1])
+        links.new(detail_spec.outputs[0], group_output.inputs["Specular"])
         links.new(bump.outputs[0], group_output.inputs["Normal"])
         links.new(_output_socket(group_input, "Metallic"), group_output.inputs["Metallic"])
-        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v6"
+        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v7"
         return group_tree
 
     def _ensure_runtime_hard_surface_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime HardSurface",
-            "hard_surface_v36",
+            "hard_surface_v38",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -664,7 +676,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime HardSurface",
-            signature="hard_surface_v36",
+            signature="hard_surface_v38",
             inputs=[
                 ("Top Base Color", "NodeSocketColor"),
                 ("Top Alpha", "NodeSocketFloat"),
@@ -704,7 +716,7 @@ class GroupsMixin:
             ],
             outputs=[("Shader", "NodeSocketShader")],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "hard_surface_v36":
+        if group_tree.get("starbreaker_runtime_built_signature") == "hard_surface_v38":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -1047,8 +1059,12 @@ class GroupsMixin:
         if hasattr(normal_mix, "data_type"):
             normal_mix.data_type = "VECTOR"
         links.new(effective_wear_factor.outputs[0], normal_mix.inputs[0])
-        links.new(_output_socket(group_input, "Primary Normal"), normal_mix.inputs[2])
-        links.new(_output_socket(group_input, "Secondary Normal"), normal_mix.inputs[3])
+        # A VECTOR Mix takes its operands at inputs 4/5 and returns at
+        # output 1; inputs 2/3 and output 0 are the hidden float ones. Wired
+        # to those, every HardSurface and Illum surface rendered with the
+        # bare geometry normal: no normal map, no detail, no engraving.
+        links.new(_output_socket(group_input, "Primary Normal"), normal_mix.inputs[4])
+        links.new(_output_socket(group_input, "Secondary Normal"), normal_mix.inputs[5])
 
         macro_normal = nodes.new("ShaderNodeNormalMap")
         macro_normal.location = (-500, -680)
@@ -1060,7 +1076,7 @@ class GroupsMixin:
         normal_add = nodes.new("ShaderNodeVectorMath")
         normal_add.location = (-300, -520)
         normal_add.operation = "ADD"
-        links.new(normal_mix.outputs[0], normal_add.inputs[0])
+        links.new(normal_mix.outputs[1], normal_add.inputs[0])
         links.new(_output_socket(macro_normal, "Normal"), normal_add.inputs[1])
 
         normal_normalize = nodes.new("ShaderNodeVectorMath")
@@ -1071,8 +1087,8 @@ class GroupsMixin:
         bump = nodes.new("ShaderNodeBump")
         bump.location = (100, -520)
         links.new(_output_socket(group_input, "Displacement Strength"), bump.inputs[0])
-        links.new(_output_socket(group_input, "Displacement Height"), bump.inputs[2])
-        links.new(normal_normalize.outputs[0], bump.inputs[3])
+        links.new(_output_socket(group_input, "Displacement Height"), _input_socket(bump, "Height"))
+        links.new(normal_normalize.outputs[0], _input_socket(bump, "Normal"))
 
         principled = self._create_surface_bsdf(nodes)
         principled.location = (320, 40)
@@ -1125,7 +1141,7 @@ class GroupsMixin:
             links.new(_output_socket(group_input, "Emission Strength"), emission_strength)
 
         links.new(principled.outputs[0], group_output.inputs["Shader"])
-        group_tree["starbreaker_runtime_built_signature"] = "hard_surface_v36"
+        group_tree["starbreaker_runtime_built_signature"] = "hard_surface_v38"
         return group_tree
 
     def _ensure_runtime_wear_input_group(self) -> bpy.types.ShaderNodeTree:
@@ -2419,7 +2435,7 @@ class GroupsMixin:
     def _ensure_runtime_illum_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime Illum",
-            "illum_v7",
+            "illum_v9",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -2431,7 +2447,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime Illum",
-            signature="illum_v7",
+            signature="illum_v9",
             inputs=[
                 ("Primary Color", "NodeSocketColor"),
                 ("Primary Alpha", "NodeSocketFloat"),
@@ -2453,7 +2469,7 @@ class GroupsMixin:
             ],
             outputs=[("Shader", "NodeSocketShader")],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "illum_v7":
+        if group_tree.get("starbreaker_runtime_built_signature") == "illum_v9":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -2494,8 +2510,12 @@ class GroupsMixin:
         if hasattr(normal_mix, "data_type"):
             normal_mix.data_type = "VECTOR"
         links.new(_output_socket(group_input, "Blend Mask"), normal_mix.inputs[0])
-        links.new(_output_socket(group_input, "Primary Normal"), normal_mix.inputs[2])
-        links.new(_output_socket(group_input, "Secondary Normal"), normal_mix.inputs[3])
+        # A VECTOR Mix takes its operands at inputs 4/5 and returns at
+        # output 1; inputs 2/3 and output 0 are the hidden float ones. Wired
+        # to those, every HardSurface and Illum surface rendered with the
+        # bare geometry normal: no normal map, no detail, no engraving.
+        links.new(_output_socket(group_input, "Primary Normal"), normal_mix.inputs[4])
+        links.new(_output_socket(group_input, "Secondary Normal"), normal_mix.inputs[5])
 
         height_mix = nodes.new("ShaderNodeMix")
         height_mix.location = (-700, -680)
@@ -2508,8 +2528,8 @@ class GroupsMixin:
         bump = nodes.new("ShaderNodeBump")
         bump.location = (-500, -560)
         links.new(_output_socket(group_input, "POM Strength"), bump.inputs[0])
-        links.new(height_mix.outputs[0], bump.inputs[2])
-        links.new(normal_mix.outputs[0], bump.inputs[3])
+        links.new(height_mix.outputs[0], _input_socket(bump, "Height"))
+        links.new(normal_mix.outputs[1], _input_socket(bump, "Normal"))
 
         principled = self._create_surface_bsdf(nodes)
         principled.location = (-120, 40)
@@ -2540,7 +2560,7 @@ class GroupsMixin:
         links.new(emission.outputs[0], add_shader.inputs[1])
 
         links.new(add_shader.outputs[0], group_output.inputs["Shader"])
-        group_tree["starbreaker_runtime_built_signature"] = "illum_v7"
+        group_tree["starbreaker_runtime_built_signature"] = "illum_v9"
         return group_tree
 
     def _ensure_runtime_parallax_group(

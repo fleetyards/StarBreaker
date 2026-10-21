@@ -134,12 +134,16 @@ class LayersMixin:
         )
         self._apply_uv_tiling(nodes, links, base_node, uv_tile, x=x - 320, y=y)
         detail_ref = _layer_texture_reference(layer, slots=detail_slots)
+        # The detail map repeats at the layer's DetailTiling on top of its
+        # UVTiling: the Banu engraved hull authors 0.6, its art-deco pattern
+        # drawn at 1 was too fine to read.
+        detail_tiling = _float_layer_public_param(layer, "DetailTiling")
         detail_channels = self._detail_texture_channels(
             nodes,
             detail_ref.export_path if detail_ref is not None else None,
             x=x,
             y=y - 420,
-            uv_tiling=uv_tile,
+            uv_tiling=uv_tile * (detail_tiling if detail_tiling > 0.0 else 1.0),
         )
         normal_ref = _layer_texture_reference(
             layer, roles=("normal_gloss",), alpha_semantic="smoothness"
@@ -208,9 +212,20 @@ class LayersMixin:
             if palette_finish_name is not None
             else None
         )
+        # A layer file without a diffuse map still authors its Diffuse colour,
+        # and the engine shades the layer with it: the Banu polycomposite
+        # layers carry Diffuse 0.033 and no TexSlot1. Left white, the
+        # Defender's hull rendered as flat 0.4-grey plastic (TintColor alone)
+        # where the game shows it near black.
+        base_color_default = None
+        if base_node is None:
+            authored_diffuse = _layer_snapshot_triplet(layer, "diffuse")
+            if authored_diffuse is not None and max(authored_diffuse) < 0.999:
+                base_color_default = authored_diffuse
         return self._connect_layer_surface_group(
             nodes,
             links,
+            base_color_default=base_color_default,
             base_color_socket=base_node.outputs[0] if base_node is not None else None,
             base_alpha_socket=(
                 _output_socket(base_node, "Alpha")
@@ -249,6 +264,7 @@ class LayersMixin:
         *,
         base_color_socket: Any,
         base_alpha_socket: Any,
+        base_color_default: tuple[float, float, float] | None = None,
         normal_color_socket: Any,
         roughness_socket: Any,
         detail_channels: dict[str, Any] | None,
@@ -281,7 +297,10 @@ class LayersMixin:
         group_node.location = (x, y)
         group_node.label = label
 
-        self._set_socket_default(_input_socket(group_node, "Base Color"), (1.0, 1.0, 1.0, 1.0))
+        self._set_socket_default(
+            _input_socket(group_node, "Base Color"),
+            (*base_color_default, 1.0) if base_color_default is not None else (1.0, 1.0, 1.0, 1.0),
+        )
         self._set_socket_default(_input_socket(group_node, "Base Alpha"), 1.0)
         self._set_socket_default(_input_socket(group_node, "Palette Color"), (1.0, 1.0, 1.0, 1.0))
         self._set_socket_default(
@@ -344,6 +363,49 @@ class LayersMixin:
 
         self._link_group_input(links, base_color_socket, group_node, "Base Color")
         self._link_group_input(links, base_alpha_socket, group_node, "Base Alpha")
+        # CryEngine detail maps pack diffuse (R), a tangent normal's X and Y
+        # (A, G) and gloss (B). Read as a bump height, the green channel's
+        # slope image gave the Banu engraved hull no relief: its art-deco
+        # pattern, the hull's whole look in game, did not show. The detail
+        # normal is added to the layer's own (partial-derivative blend).
+        detail_alpha = detail_channels.get("alpha") if detail_channels is not None else None
+        if detail_height_socket is not None and detail_alpha is not None and detail_bump_strength > 0.0:
+            combine = nodes.new("ShaderNodeCombineColor")
+            combine.location = (x - 420, y - 700)
+            combine.label = "Detail Normal"
+            links.new(detail_alpha, combine.inputs[0])
+            links.new(detail_height_socket, combine.inputs[1])
+            combine.inputs[2].default_value = 1.0
+            blend = nodes.new("ShaderNodeMixRGB")
+            blend.location = (x - 220, y - 700)
+            blend.blend_type = "LINEAR_LIGHT"
+            blend.label = "Detail Normal Blend"
+            blend.inputs[0].default_value = 0.5 * min(1.0, detail_bump_strength)
+            if normal_color_socket is not None:
+                links.new(normal_color_socket, blend.inputs[1])
+            else:
+                blend.inputs[1].default_value = (0.5, 0.5, 1.0, 1.0)
+            # A gain node (1 here) the render scripts can raise per material:
+            # the detail relief is authored for the engine's lighting.
+            detail_normal_out = combine.outputs[0]
+            centre = nodes.new("ShaderNodeVectorMath")
+            centre.operation = "SUBTRACT"
+            centre.inputs[1].default_value = (0.5, 0.5, 0.0)
+            links.new(detail_normal_out, centre.inputs[0])
+            amp = nodes.new("ShaderNodeVectorMath")
+            amp.operation = "MULTIPLY"
+            amp.inputs[1].default_value = (1.0, 1.0, 1.0)
+            amp.label = "Detail Normal Gain"
+            links.new(centre.outputs[0], amp.inputs[0])
+            back = nodes.new("ShaderNodeVectorMath")
+            back.operation = "ADD"
+            back.inputs[1].default_value = (0.5, 0.5, 0.0)
+            links.new(amp.outputs[0], back.inputs[0])
+            detail_normal_out = back.outputs[0]
+            links.new(detail_normal_out, blend.inputs[2])
+            normal_color_socket = blend.outputs[0]
+            detail_height_socket = None
+            self._set_socket_default(_input_socket(group_node, "Detail Bump Strength"), 0.0)
         self._link_group_input(links, normal_color_socket, group_node, "Normal Color")
         self._link_group_input(links, roughness_socket, group_node, "Roughness Source")
         self._link_group_input(links, specular_socket, group_node, "Specular Value")

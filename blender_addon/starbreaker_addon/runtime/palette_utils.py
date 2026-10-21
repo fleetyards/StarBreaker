@@ -39,6 +39,13 @@ def _palette_channel_has_iridescence(
     if facing is None:
         return False
     grazing = palette_color(palette, channel)
+    # A black diffuse under a coloured specular is CryEngine's coloured
+    # metal, not an angle shift: the Banu Defender's gold (secondary, spec
+    # 0.47/0.34/0.14 over black) went through the iridescence path, which
+    # paints the palette colour flat and drops the layer's own detail -- the
+    # engraved hull pattern never showed.
+    if max(grazing) < 0.02:
+        return False
     specular_chroma = max(facing) - min(facing)
     if specular_chroma < 0.10:
         return False

@@ -602,9 +602,9 @@ class MaterialsMixin:
             links.new(strength_socket, bump.inputs[0])
         elif strength is not None:
             bump.inputs[0].default_value = strength
-        links.new(height_socket, bump.inputs[2])
+        links.new(height_socket, _input_socket(bump, "Height"))
         if base_normal_socket is not None:
-            links.new(base_normal_socket, bump.inputs[3])
+            links.new(base_normal_socket, _input_socket(bump, "Normal"))
         return bump.outputs[0]
 
 
