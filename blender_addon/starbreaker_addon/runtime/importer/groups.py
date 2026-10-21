@@ -511,7 +511,7 @@ class GroupsMixin:
     def _ensure_runtime_layer_surface_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime LayerSurface",
-            "layer_surface_v7",
+            "layer_surface_v9",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -520,7 +520,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime LayerSurface",
-            signature="layer_surface_v7",
+            signature="layer_surface_v9",
             inputs=[
                 ("Base Color", "NodeSocketColor"),
                 ("Base Alpha", "NodeSocketFloat"),
@@ -535,6 +535,7 @@ class GroupsMixin:
                 ("Normal Color", "NodeSocketColor"),
                 ("Roughness Source", "NodeSocketFloat"),
                 ("Palette Glossiness", "NodeSocketFloat"),
+                ("Detail Specular Strength", "NodeSocketFloat"),
                 ("Specular Value", "NodeSocketFloat"),
                 ("Palette Specular", "NodeSocketFloat"),
                 ("Metallic", "NodeSocketFloat"),
@@ -549,7 +550,7 @@ class GroupsMixin:
                 ("Metallic", "NodeSocketFloat"),
             ],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v7":
+        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v9":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -646,22 +647,30 @@ class GroupsMixin:
         links.new(metallic_color_mix.outputs[0], group_output.inputs["Color"])
         links.new(_output_socket(group_input, "Base Alpha"), group_output.inputs["Alpha"])
         links.new(roughness.outputs[0], group_output.inputs["Roughness"])
-        # The detail colour also scales the reflectance: on a layer whose
-        # colour is all specular (the Banu engraved gold, palette diffuse
-        # black) a diffuse-only detail left the engraving invisible.
-        detail_spec = nodes.new("ShaderNodeMath")
-        detail_spec.location = (-120, -420)
-        detail_spec.operation = "MULTIPLY"
-        detail_spec.use_clamp = True
-        links.new(specular.outputs[0], detail_spec.inputs[0])
+        # Off by default (0): the detail colour scales the reflectance only
+        # where a render asks for it. On every layer it darkened the DRAK
+        # Ironclad's hull; on the Banu Defender's engraved gold, a colour
+        # that is all reflection, it is what makes the engraving read.
         detail_luma = nodes.new("ShaderNodeRGBToBW")
         detail_luma.location = (-320, -520)
         links.new(detail_mix.outputs[0], detail_luma.inputs[0])
-        links.new(detail_luma.outputs[0], detail_spec.inputs[1])
+        detail_spec_mix = nodes.new("ShaderNodeMix")
+        detail_spec_mix.location = (-120, -520)
+        if hasattr(detail_spec_mix, "data_type"):
+            detail_spec_mix.data_type = "FLOAT"
+        links.new(_output_socket(group_input, "Detail Specular Strength"), detail_spec_mix.inputs[0])
+        detail_spec_mix.inputs[2].default_value = 1.0
+        links.new(detail_luma.outputs[0], detail_spec_mix.inputs[3])
+        detail_spec = nodes.new("ShaderNodeMath")
+        detail_spec.location = (80, -420)
+        detail_spec.operation = "MULTIPLY"
+        detail_spec.use_clamp = True
+        links.new(specular.outputs[0], detail_spec.inputs[0])
+        links.new(detail_spec_mix.outputs[0], detail_spec.inputs[1])
         links.new(detail_spec.outputs[0], group_output.inputs["Specular"])
         links.new(bump.outputs[0], group_output.inputs["Normal"])
         links.new(_output_socket(group_input, "Metallic"), group_output.inputs["Metallic"])
-        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v7"
+        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v9"
         return group_tree
 
     def _ensure_runtime_hard_surface_group(self) -> bpy.types.ShaderNodeTree:

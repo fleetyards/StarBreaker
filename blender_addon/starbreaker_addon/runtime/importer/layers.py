@@ -325,6 +325,7 @@ class LayersMixin:
             _input_socket(group_node, "Palette Glossiness"),
             palette_glossiness if palette_glossiness is not None else 0.0,
         )
+        self._set_socket_default(_input_socket(group_node, "Detail Specular Strength"), 0.0)
         self._set_socket_default(_input_socket(group_node, "Specular Value"), specular_value)
         self._set_socket_default(
             _input_socket(group_node, "Palette Specular"), palette_specular_value
