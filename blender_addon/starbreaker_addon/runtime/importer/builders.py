@@ -1807,12 +1807,13 @@ class BuildersMixin:
                     if palette_socket is not None:
                         # No palette channel: the authored Diffuse tints the
                         # texture (the Spartan's tyres, the F8C's rockets were
-                        # black). Glows and decals stay dark: unlit, the Mk V's
-                        # glow trims would print as flat blue paint.
+                        # black). %DECAL too: the Heartseeker's pin-up, the
+                        # Razor's sponsor logos and the Fortune's chevrons
+                        # printed as black silhouettes. Glows stay dark: unlit,
+                        # the Mk V's glow trims would print as flat blue paint.
                         unlit = (
                             (_float_authored_attribute(submaterial, "Glow") or 0.0) <= 0.0
                             and "glow" not in submaterial.submaterial_name.lower()
-                            and not submaterial.decoded_feature_flags.has_decal
                         )
                         diffuse = _authored_attribute_triplet(submaterial, "Diffuse") if unlit else None
                         palette_socket.default_value = (*diffuse, 1.0) if diffuse is not None else ((1.0, 1.0, 1.0, 1.0) if unlit else (0.0, 0.0, 0.0, 1.0))
