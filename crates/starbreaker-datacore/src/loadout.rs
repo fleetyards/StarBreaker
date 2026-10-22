@@ -417,7 +417,7 @@ fn resolve_sub_geometry(idx: &EntityIndex, children: &mut [LoadoutNode]) {
         if !should_attempt_sub_geometry_resolution(child.geometry_path.as_deref(), &variants) {
             continue;
         }
-        let matched = if variants_belong_to_item(child.geometry_path.as_deref(), &variants) {
+        let matched = if variants_belong_to_item(&child.entity_name, child.geometry_path.as_deref(), &variants) {
             match_sub_geometry_variant(&variants, &child.port_tags, child.helper_bone_name.as_deref(), &child.item_port_name)
         } else {
             log::debug!(
@@ -506,13 +506,43 @@ fn needs_variant_fallback(geometry_path: Option<&str>) -> bool {
 /// thruster and pick left/right hull meshes), so the tell is the
 /// manufacturer: variants from another manufacturer's folder than the item's
 /// own mesh are leftovers, and only explicit port tags may pick one.
-fn variants_belong_to_item(geometry_path: Option<&str>, variants: &[SubGeometryVariant]) -> bool {
+///
+/// The same goes for another ship's folder of the same category and maker,
+/// unless that folder names the item's ship: the Hull A's VTOL thrusters
+/// (`thrusters/misc/misc_hull`) still list the Prospector's left/right meshes
+/// (`thrusters/misc/misc_prospector`), while the Scythe's main thruster
+/// defaults to a Blade mesh and finds its own in `vncl_scythe_thrusters`.
+fn variants_belong_to_item(entity_name: &str, geometry_path: Option<&str>, variants: &[SubGeometryVariant]) -> bool {
     let Some(own) = geometry_path.and_then(geometry_manufacturer) else {
         return true;
     };
+    let own_family = geometry_path.and_then(geometry_family);
+    let entity = entity_name.to_ascii_lowercase();
+    let names_item = |folder: &str| {
+        folder
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token.len() > 2 && token != own && entity.split('_').any(|part| part == token))
+    };
     variants.iter().any(|variant| {
         geometry_manufacturer(&variant.geometry_path).is_none_or(|maker| maker == own)
+            && match (&own_family, geometry_family(&variant.geometry_path)) {
+                (Some((own_category, own_folder)), Some((category, folder))) => {
+                    category != *own_category || folder == *own_folder || names_item(&folder)
+                }
+                _ => true,
+            }
     })
+}
+
+/// Category and the folder below the manufacturer:
+/// `objects/spaceships/<category>/<manufacturer>/<folder>/...`.
+fn geometry_family(path: &str) -> Option<(String, String)> {
+    let normalized = path.trim().replace('\\', "/").to_ascii_lowercase();
+    let segments: Vec<&str> = normalized.split('/').filter(|segment| !segment.is_empty()).collect();
+    if segments.len() < 6 || segments[0] != "objects" || segments[1] != "spaceships" {
+        return None;
+    }
+    Some((segments[2].to_string(), segments[4].to_string()))
 }
 
 /// Manufacturer folder of a ship part mesh:
@@ -679,7 +709,7 @@ pub fn select_variants_by_port_flags(
             child.port_flags = flags.clone();
         }
         let variants = query_sub_geometry(db, &child.record);
-        if variants.is_empty() || !variants_belong_to_item(child.geometry_path.as_deref(), &variants) {
+        if variants.is_empty() || !variants_belong_to_item(&child.entity_name, child.geometry_path.as_deref(), &variants) {
             continue;
         }
         if !child.port_tags.is_empty() && best_sub_geometry_variant_match(&variants, &child.port_tags).is_some() {
@@ -980,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn variants_from_another_manufacturer_are_leftovers() {
+    fn variants_from_another_maker_or_ship_are_leftovers() {
         let variant = |tag: &str, path: &str| SubGeometryVariant {
             tag: tag.to_string(),
             geometry_path: path.to_string(),
@@ -992,15 +1022,17 @@ mod tests {
         ];
         // Merlin left wing: its own KRIG mesh, with the 350R winglets left over.
         assert!(!variants_belong_to_item(
+            "KRIG_P52_Merlin_Wing_Left",
             Some("objects/spaceships/ships/krig/p52_merlin/krig_p52_merlin_wing_left.cga"),
             &winglets
         ));
         // 350R winglet.
         assert!(variants_belong_to_item(
+            "ORIG_350r_Winglet_Nose_Left",
             Some("Objects\\Spaceships\\Ships\\ORIG\\300_series\\orig_350r_winglet_nose_left.cga"),
             &winglets
         ));
-        assert!(variants_belong_to_item(None, &winglets));
+        assert!(variants_belong_to_item("", None, &winglets));
 
         // Bengal engines: generic default thruster, hull-specific variants.
         let bengal = vec![
@@ -1008,8 +1040,30 @@ mod tests {
             variant("r", "objects/spaceships/ships/rsi/bengal/exterior/rsi_bengal_engine_main_r.cga"),
         ];
         assert!(variants_belong_to_item(
+            "RSI_Bengal_Thruster_Main_Small",
             Some("objects/spaceships/thrusters/rsi/bengal/bengal_engine_small.cga"),
             &bengal
+        ));
+
+        // Hull A VTOL thruster: its own mesh, with the Prospector's left over.
+        let prospector = vec![
+            variant("left", "objects/spaceships/thrusters/misc/misc_prospector/misc_prospector_thruster_retro_left.cga"),
+            variant("right", "objects/spaceships/thrusters/misc/misc_prospector/misc_prospector_thruster_retro_right.cga"),
+        ];
+        assert!(!variants_belong_to_item(
+            "MISC_Hull_A_Thruster_VTOL",
+            Some("Objects/Spaceships/Thrusters/MISC/MISC_Hull/Hull_A/MISC_Hull_A_Vtol.cga"),
+            &prospector
+        ));
+        // Scythe main thruster: a Blade default mesh, its own meshes as variants.
+        let scythe = vec![
+            variant("left", "objects/spaceships/thrusters/vncl/vncl_scythe_thrusters/vncl_scythe_thruster_main_fixed_left.cga"),
+            variant("right", "objects/spaceships/thrusters/vncl/vncl_scythe_thrusters/vncl_scythe_thruster_main_fixed_right.cga"),
+        ];
+        assert!(variants_belong_to_item(
+            "VNCL_Scythe_Thruster_Main_Fixed",
+            Some("objects/spaceships/thrusters/vncl/vncl_blade_thrusters/vncl_blade_thruster_main_fixed_01_left.cga"),
+            &scythe
         ));
     }
 
