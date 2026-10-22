@@ -274,7 +274,10 @@ class OrchestrationMixin:
         if len(matches) != 1:
             return None
         # Only a positional twin of the authored file may be read by position:
-        # same layout, nearly every name unchanged, a real name at the slot.
+        # same layout, most names unchanged, a real name at the slot. Half,
+        # not 90%: the Mustang Alpha's file calls nine of the Omega's 39 hull
+        # paints SubMtl31-39, and those slots fell back to their own index
+        # (internal_structure, cables) on the shared hull mesh.
         try:
             target = self.package.load_material_sidecar(sidecar_path)
         except Exception:
@@ -283,7 +286,7 @@ class OrchestrationMixin:
             return None
         target_names = {sub.index: sub.submaterial_name.strip() for sub in target.submaterials}
         same = sum(1 for sub in authored.submaterials if target_names.get(sub.index) == sub.submaterial_name.strip())
-        if same < 0.9 * len(authored.submaterials):
+        if same < 0.5 * len(authored.submaterials):
             return None
         if target_names.get(matches[0].index, "").strip("-") == "":
             return None
