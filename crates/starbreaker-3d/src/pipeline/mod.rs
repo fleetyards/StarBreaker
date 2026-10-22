@@ -909,6 +909,14 @@ mod tests {
     }
 
     #[test]
+    fn resolve_mtl_p4k_path_name_with_extension() {
+        assert_eq!(
+            resolve_mtl_p4k_path("BigBox.mtl", "Data\\Objects\\Spaceships\\Cargo\\Stor-All\\BigBox\\StorAll_BigBoxAnvilHornet.cga"),
+            "Data\\Objects\\Spaceships\\Cargo\\Stor-All\\BigBox\\BigBox.mtl"
+        );
+    }
+
+    #[test]
     fn test_datacore_path_to_p4k_simple() {
         assert_eq!(
             datacore_path_to_p4k("objects/ships/aegs/aegs_gladius.skin"),

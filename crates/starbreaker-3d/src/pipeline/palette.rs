@@ -21,6 +21,12 @@ use crate::mtl;
 use super::{datacore_path_to_p4k, decode_png, load_diffuse_texture};
 
 pub(crate) fn resolve_mtl_p4k_path(mtl_name: &str, p4k_geom_path: &str) -> String {
+    // Some meshes name the material with its extension (Stor-All BigBox:
+    // `BigBox.mtl`), which would otherwise resolve to `BigBox.mtl.mtl`.
+    let mtl_name = match mtl_name.len().checked_sub(4) {
+        Some(cut) if mtl_name.get(cut..).is_some_and(|ext| ext.eq_ignore_ascii_case(".mtl")) => &mtl_name[..cut],
+        _ => mtl_name,
+    };
     if mtl_name.contains('/') || mtl_name.contains('\\') {
         format!("Data\\{}.mtl", mtl_name.replace('/', "\\"))
     } else {
