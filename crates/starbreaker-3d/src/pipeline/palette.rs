@@ -27,6 +27,13 @@ pub(crate) fn resolve_mtl_p4k_path(mtl_name: &str, p4k_geom_path: &str) -> Strin
         Some(cut) if mtl_name.get(cut..).is_some_and(|ext| ext.eq_ignore_ascii_case(".mtl")) => &mtl_name[..cut],
         _ => mtl_name,
     };
+    // ...and some with the full p4k path (the 300 series' pilot seat:
+    // `Data/Objects/.../orig_300_seat_black_wood.mtl`), which would get a
+    // second `Data\` in front.
+    let mtl_name = match mtl_name.get(..5) {
+        Some(head) if head.eq_ignore_ascii_case("data/") || head.eq_ignore_ascii_case("data\\") => &mtl_name[5..],
+        _ => mtl_name,
+    };
     if mtl_name.contains('/') || mtl_name.contains('\\') {
         format!("Data\\{}.mtl", mtl_name.replace('/', "\\"))
     } else {

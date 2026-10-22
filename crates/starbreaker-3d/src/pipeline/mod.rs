@@ -917,6 +917,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_mtl_p4k_path_full_p4k_path() {
+        assert_eq!(
+            resolve_mtl_p4k_path(
+                "Data/Objects/Spaceships/Ships/ORIG/300_Series/Custom_Paint/orig_300_seat_black_wood.mtl",
+                "Data\\Objects\\Spaceships\\Ships\\ORIG\\300_Series\\ORIG_300I_Seat_Pilot.cga"
+            ),
+            "Data\\Objects\\Spaceships\\Ships\\ORIG\\300_Series\\Custom_Paint\\orig_300_seat_black_wood.mtl"
+        );
+    }
+
+    #[test]
     fn test_datacore_path_to_p4k_simple() {
         assert_eq!(
             datacore_path_to_p4k("objects/ships/aegs/aegs_gladius.skin"),
