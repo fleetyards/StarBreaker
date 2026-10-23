@@ -1730,6 +1730,54 @@ class BuildersMixin:
         self._wire_surface_shader_to_output(nodes, links, surface_shader, output, plan, submaterial)
         self._configure_material(material, blend_method=plan.blend_method, shadow_method=plan.shadow_method)
 
+    def _illum_spec_map_metal(
+        self, nodes: Any, links: Any, submaterial: SubmaterialRecord, base_color: Any, specular: Any
+    ) -> tuple[Any, Any, Any]:
+        """Where an Illum specular map (times the authored Specular) is a
+        metal's F0, its colour is the surface colour.
+
+        The LuxCore's heat-sink plate has a dark tan diffuse under a golden
+        spec map (213/190/131 x 0.479): brass in game. Fed only the map's
+        luma as a partial metallic, it kept the tan and mirrored the studio
+        grey-white. F0 above ~0.12 counts as metal, fully from 0.3 on;
+        painted panels (Specular ~0.045) stay as they were.
+        """
+        if specular is None:
+            return base_color, None, None
+        path = self._texture_path_for_slot(submaterial, "TexSlot4")
+        spec_node = self._image_node(nodes, path, x=-1000, y=900, is_color=False) if path else None
+        if spec_node is None:
+            return base_color, None, None
+        authored = _authored_attribute_triplet(submaterial, "Specular")
+        grey = sum(authored[:3]) / 3.0 if authored else 1.0
+        if grey >= 0.99:
+            grey = 1.0
+        # The surface group multiplies a metal's colour by the Diffuse tint;
+        # F0 is not the paint's, so that is divided back out.
+        diffuse = _authored_attribute_triplet(submaterial, "Diffuse")
+        tint = sum(diffuse[:3]) / 3.0 if diffuse else 1.0
+        if tint > 0.05:
+            grey = min(grey / tint, 1.0)
+        colour = nodes.new("ShaderNodeMixRGB")
+        colour.blend_type = "MULTIPLY"
+        colour.location = (-760, 1000)
+        colour.inputs[0].default_value = 1.0
+        links.new(spec_node.outputs["Color"], colour.inputs[1])
+        colour.inputs[2].default_value = (grey, grey, grey, 1.0)
+        mask = nodes.new("ShaderNodeMapRange")
+        mask.interpolation_type = "SMOOTHSTEP"
+        mask.location = (-760, 820)
+        mask.inputs["From Min"].default_value = 0.12
+        mask.inputs["From Max"].default_value = 0.3
+        links.new(specular, mask.inputs["Value"])
+        mixed = nodes.new("ShaderNodeMixRGB")
+        mixed.blend_type = "MIX"
+        mixed.location = (-580, 900)
+        links.new(mask.outputs["Result"], mixed.inputs[0])
+        links.new(base_color, mixed.inputs[1])
+        links.new(colour.outputs[0], mixed.inputs[2])
+        return mixed.outputs[0], mask.outputs["Result"], colour.outputs[0]
+
     def _legacy_blend_layer_mask(self, nodes: Any, links: Any, submaterial: SubmaterialRecord) -> Any:
         """CryEngine 3 Illum %BLENDLAYER: the blend map (TexSlot12, red) times
         the vertex alpha, scaled by 1 + BlendFactor, to the power BlendFalloff."""
@@ -1881,10 +1929,16 @@ class BuildersMixin:
             links.new(primary_alpha_source, scale.inputs[0])
             scale.inputs[1].default_value = decal_opacity
             primary_alpha_source = scale.outputs[0]
+        primary_base_color = decal_palette.color if decal_palette.color is not None else (primary_color_node.outputs[0] if primary_color_node is not None else None)
+        primary_metal_mask = primary_metal_colour = None
+        if tinted_specular is None and decal_palette.color is None and primary_base_color is not None:
+            primary_base_color, primary_metal_mask, primary_metal_colour = self._illum_spec_map_metal(
+                nodes, links, submaterial, primary_base_color, primary_specular
+            )
         primary = self._connect_layer_surface_group(
             nodes,
             links,
-            base_color_socket=decal_palette.color if decal_palette.color is not None else (primary_color_node.outputs[0] if primary_color_node is not None else None),
+            base_color_socket=primary_base_color,
             base_alpha_socket=self._alpha_tested_socket(
                 nodes,
                 links,
@@ -1909,7 +1963,7 @@ class BuildersMixin:
             metallic_value=1.0 if tinted_specular is not None else 0.0,
             specular_color=tinted_specular,
             specular_socket=primary_specular,
-            metallic_socket=None if tinted_specular is not None else primary_specular,
+            metallic_socket=None if tinted_specular is not None else (primary_metal_mask or primary_specular),
             x=-180,
             y=220,
             label="Primary Layer",
@@ -2017,6 +2071,16 @@ class BuildersMixin:
         self._set_socket_default(_input_socket(shader_group, "Emission Color"), (1.0, 1.0, 1.0, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Emission Strength"), self._illum_emission_strength(submaterial))
         self._set_socket_default(_input_socket(shader_group, "Primary Metallic"), 1.0 if tinted_specular is not None else 0.0)
+        if primary_metal_mask is not None:
+            # The Illum group reads metallic here, not from the surface: the
+            # LuxCore's brass plate, F0 0.36, drew as white-glossy plastic.
+            self._link_group_input(links, primary_metal_mask, shader_group, "Primary Metallic")
+            # A metal's colour is the surface group's Specular Color (0.04
+            # grey by default): the plate came out dark grey, not brass.
+            surface = next((n for n in nodes if n.type == "GROUP" and n.label == "Primary Layer"), None)
+            target = _input_socket(surface, "Specular Color") if surface is not None else None
+            if target is not None and primary_metal_colour is not None:
+                links.new(primary_metal_colour, target)
 
         self._link_group_input(links, primary.color, shader_group, "Primary Color")
         self._link_group_input(links, primary.alpha, shader_group, "Primary Alpha")
