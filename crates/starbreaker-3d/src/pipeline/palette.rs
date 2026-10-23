@@ -566,12 +566,32 @@ pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Opt
                 .any(|t| t.eq_ignore_ascii_case(tag))
         });
         let Some(sub) = tagged else { continue };
-        let geometry = get_value_field(sub, "Geometry")
-            .and_then(|g| get_value_field(g, "Geometry"))
-            .and_then(|g| get_value_string(g, "path"))
-            .filter(|p| !p.is_empty())?
-            .to_string();
-        let material = sub_material(sub)
+        let geometry_of = |entry: &Value| -> Option<String> {
+            get_value_field(entry, "Geometry")
+                .and_then(|g| get_value_field(g, "Geometry"))
+                .and_then(|g| get_value_string(g, "path"))
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+        };
+        // The worn .skin is bound to the character skeleton, and some keep
+        // their pieces relative to its bones (the Outlaw Inquisitor core came
+        // out as plates scattered over 1.5 m; worn arms stand in a T-pose).
+        // The inventory model under it -- a static _prop.cgf the game shows
+        // in the inventory, with the same material and palette -- is
+        // assembled; it is taken when there is one.
+        let stored = get_value_array(sub, "SubGeometry").and_then(|children| {
+            children.iter().find(|child| {
+                get_value_string(child, "Tags")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .any(|t| t.eq_ignore_ascii_case("inventoryStoredEntity"))
+                    && geometry_of(child).is_some()
+            })
+        });
+        let geometry = stored.and_then(|child| geometry_of(child)).or_else(|| geometry_of(sub))?;
+        let material = stored
+            .and_then(|child| sub_material(child))
+            .or_else(|| sub_material(sub))
             .or_else(|| {
                 get_value_field(root, "Geometry")
                     .and_then(|g| get_value_field(g, "Material"))
@@ -581,7 +601,10 @@ pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Opt
             })
             .or_else(|| subs.iter().find_map(|other| sub_material(other)))
             .unwrap_or_default();
-        let palette = get_value_field(sub, "Geometry").and_then(|g| extract_subgeometry_palette(g, None));
+        let palette = stored
+            .and_then(|child| get_value_field(child, "Geometry"))
+            .and_then(|g| extract_subgeometry_palette(g, None))
+            .or_else(|| get_value_field(sub, "Geometry").and_then(|g| extract_subgeometry_palette(g, None)));
         return Some(WornGeometry { geometry, material, palette });
     }
     None

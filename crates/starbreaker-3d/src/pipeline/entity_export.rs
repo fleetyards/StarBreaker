@@ -277,7 +277,12 @@ fn load_geometry_parts(
         load_single_mesh(p4k, &primary_path, effective_material, opts, png_cache, use_model_bbox)?;
     remap_skin_joints_to_skeleton(p4k, &mut mesh, &primary_path, &skeleton_bones);
 
-    if nmc.is_none() {
+    // Only a CDF's own skeleton places the parts of a skinned primary (the
+    // P4-AR's bolt and cover plate). A bare .skin -- an armour core or arms
+    // exported with --worn -- is bound to the character skeleton, whose root
+    // is not at the origin: split and rebased against it the Inquisitor core
+    // scattered into fragments. Its model-space vertices are the bind pose.
+    if nmc.is_none() && resolved.skeleton_path.is_some() {
         nmc = synthesize_nmc_from_bones(&mesh, &skeleton_bones);
         if nmc.is_some() {
             rebase_mesh_submeshes_to_bone_space(&mut mesh, &skeleton_bones);
@@ -331,6 +336,32 @@ fn load_geometry_parts(
                             part.attach_rotation,
                             part.attach_position,
                         );
+                    }
+                }
+                // The part is in model space now; its submeshes still carry
+                // its own node or skin-joint indices. Under the primary's
+                // node table those name unrelated nodes and moved the part a
+                // second time (the Gallant's parts.skin on its body CGF), so
+                // it hangs from the root node instead.
+                if let Some(primary_nmc) = nmc.as_ref() {
+                    if let Some(root) = primary_nmc.nodes.iter().position(|node| node.parent_index.is_none()) {
+                        let world = super::compute_nmc_world_transforms(primary_nmc);
+                        if let Some(root_world) = world.get(root) {
+                            if *root_world != glam::Mat4::IDENTITY {
+                                let inverse = root_world.inverse();
+                                for position in &mut extra_mesh.positions {
+                                    *position = inverse.transform_point3(glam::Vec3::from(*position)).into();
+                                }
+                                if let Some(normals) = extra_mesh.normals.as_mut() {
+                                    for normal in normals {
+                                        *normal = inverse.transform_vector3(glam::Vec3::from(*normal)).normalize().into();
+                                    }
+                                }
+                            }
+                        }
+                        for submesh in &mut extra_mesh.submeshes {
+                            submesh.node_parent_index = root as u16;
+                        }
                     }
                 }
                 mesh.merge_from(extra_mesh);
