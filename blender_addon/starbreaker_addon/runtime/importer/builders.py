@@ -113,8 +113,16 @@ def _layered_wear_base_layer(
 def _layered_wear_first_diffuse_layer(
     submaterial: SubmaterialRecord,
 ) -> LayerManifestEntry | None:
+    # Never a wear layer's: the Gallant's polished-aluminium front rail
+    # (H_bare_01_B) has no diffuse map of its own and took its wear layer's
+    # grime map, a dirty green on bare metal.
     return next(
-        (layer for layer in submaterial.layer_manifest if layer.diffuse_export_path),
+        (
+            layer
+            for layer in submaterial.layer_manifest
+            if layer.diffuse_export_path
+            and not (getattr(layer, "name", None) or "").lower().startswith("wearlayer")
+        ),
         None,
     )
 

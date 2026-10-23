@@ -217,7 +217,17 @@ def first_texture_export(submaterial: SubmaterialRecord, roles: tuple[str, ...])
 
 
 def representative_textures(submaterial: SubmaterialRecord) -> dict[str, str | None]:
-    layer_base = next((layer.diffuse_export_path for layer in submaterial.layer_manifest if layer.diffuse_export_path), None)
+    # Not a wear layer's diffuse: the Gallant's polished-aluminium front rail
+    # has no diffuse of its own and took its wear layer's grime map.
+    layer_base = next(
+        (
+            layer.diffuse_export_path
+            for layer in submaterial.layer_manifest
+            if layer.diffuse_export_path
+            and not (getattr(layer, "name", None) or "").lower().startswith("wearlayer")
+        ),
+        None,
+    )
     layer_normal = next((layer.normal_export_path for layer in submaterial.layer_manifest if layer.normal_export_path), None)
     layer_roughness = next((layer.roughness_export_path for layer in submaterial.layer_manifest if layer.roughness_export_path), None)
     return {
