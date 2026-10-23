@@ -240,7 +240,7 @@ fn load_geometry_parts(
         .material_override
         .as_deref()
         .unwrap_or(material_path);
-    let (mut mesh, mtl_file, textures, mut nmc) =
+    let (mut mesh, mut mtl_file, textures, mut nmc) =
         load_single_mesh(p4k, &primary_path, effective_material, opts, png_cache, use_model_bbox)?;
     remap_skin_joints_to_skeleton(p4k, &mut mesh, &primary_path, &skeleton_bones);
 
@@ -254,8 +254,31 @@ fn load_geometry_parts(
     // Merge additional parts (CA_BONE/CA_SKIN attachments from CDF).
     let no_tex_opts = ExportOptions { material_mode: MaterialMode::Colors, ..opts.clone() };
     for part in &resolved.parts[1..] {
-        match load_single_mesh(p4k, &part.path, material_path, &no_tex_opts, png_cache, use_model_bbox) {
-            Ok((mut extra_mesh, _, _, _)) => {
+        let part_material = part.material_override.as_deref().unwrap_or(material_path);
+        match load_single_mesh(p4k, &part.path, part_material, &no_tex_opts, png_cache, use_model_bbox) {
+            Ok((mut extra_mesh, extra_mtl, _, extra_nmc)) => {
+                // The part's own CGA nodes place its geometry; merged into
+                // the primary, their transforms would be lost. The M50
+                // thruster Housing hangs 1.956 m forward on its _geo node and
+                // stuck out 2 m behind the tail without it.
+                bake_part_node_transforms(&mut extra_mesh, extra_nmc.as_ref());
+                // A part with its own material file (the M50 thruster's
+                // Housing, on ORIG_M50.mtl) indexes that file: append its
+                // submaterials and shift the part's ids past the primary's.
+                // Left pointing into the primary file, its faces had no
+                // material and the decomposed export dropped them.
+                if let (Some(own), Some(extra)) = (mtl_file.as_mut(), extra_mtl) {
+                    if part.material_override.is_some() && extra.source_path != own.source_path {
+                        let base = own.materials.len() as u32;
+                        own.materials.extend(extra.materials);
+                        for submesh in &mut extra_mesh.submeshes {
+                            submesh.material_id += base;
+                            if let Some(source) = submesh.source_material_id.as_mut() {
+                                *source += base;
+                            }
+                        }
+                    }
+                }
                 remap_skin_joints_to_skeleton(p4k, &mut extra_mesh, &part.path, &skeleton_bones);
                 if let Some(ref bone_name) = part.bone_name {
                     if let Some(bone) = skeleton_bones.iter().find(|b| b.name.eq_ignore_ascii_case(bone_name)) {
@@ -510,6 +533,59 @@ fn parse_floats<const N: usize>(value: &str) -> Option<[f32; N]> {
 /// `L/R_Shoulder` and `L/R_Front_Leg_Armor`: composing the bone rotation puts
 /// 0 of 4 inside the limb they belong to, this rule puts 4 of 4 there, and the
 /// pairs come out mirrored as authored.
+/// Move each submesh of a CDF part into its CGA node's frame (`bone_to_world`),
+/// so the part can be merged into another mesh's space. Every vertex is moved
+/// once, by the first submesh that indexes it.
+fn bake_part_node_transforms(mesh: &mut crate::Mesh, nmc: Option<&nmc::NodeMeshCombo>) {
+    let Some(nmc) = nmc else { return };
+    let mut moved = vec![false; mesh.positions.len()];
+    for submesh in &mesh.submeshes {
+        let Some(node) = nmc.nodes.get(submesh.node_parent_index as usize) else { continue };
+        let m = node.bone_to_world;
+        let identity = (0..3).all(|r| (0..4).all(|c| (m[r][c] - if r == c { 1.0 } else { 0.0 }).abs() < 1e-6));
+        if identity {
+            continue;
+        }
+        let start = submesh.first_index as usize;
+        let end = (start + submesh.num_indices as usize).min(mesh.indices.len());
+        for &index in &mesh.indices[start..end] {
+            let v = index as usize;
+            if v >= moved.len() || moved[v] {
+                continue;
+            }
+            moved[v] = true;
+            let [x, y, z] = mesh.positions[v];
+            mesh.positions[v] = [
+                m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3],
+                m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3],
+                m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3],
+            ];
+            if let Some(normals) = mesh.normals.as_mut() {
+                if let Some(n) = normals.get_mut(v) {
+                    let [x, y, z] = *n;
+                    *n = [
+                        m[0][0] * x + m[0][1] * y + m[0][2] * z,
+                        m[1][0] * x + m[1][1] * y + m[1][2] * z,
+                        m[2][0] * x + m[2][1] * y + m[2][2] * z,
+                    ];
+                }
+            }
+        }
+    }
+    if moved.iter().any(|&m| m) {
+        let mut mn = [f32::MAX; 3];
+        let mut mx = [f32::MIN; 3];
+        for p in &mesh.positions {
+            for i in 0..3 {
+                mn[i] = mn[i].min(p[i]);
+                mx[i] = mx[i].max(p[i]);
+            }
+        }
+        mesh.model_min = mn;
+        mesh.model_max = mx;
+    }
+}
+
 fn transform_mesh_by_bone(
     mesh: &mut crate::Mesh,
     bone: &crate::skeleton::Bone,

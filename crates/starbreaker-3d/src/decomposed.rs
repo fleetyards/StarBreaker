@@ -2082,6 +2082,7 @@ fn canonical_sidecar_materials_from_source(
     mtl_cache: &mut HashMap<String, Option<MtlFile>>,
 ) -> (MtlFile, Vec<u32>) {
     if let Some(parsed) = load_mtl_cached(p4k, mtl_cache, source_material_path) {
+        let parsed_len = parsed.materials.len() as u32;
         let mut original_indices = Vec::new();
         let mut non_hidden = Vec::new();
         for (idx, material) in parsed.materials.into_iter().enumerate() {
@@ -2090,6 +2091,15 @@ fn canonical_sidecar_materials_from_source(
             }
             original_indices.push(idx as u32);
             non_hidden.push(material);
+        }
+        // Submaterials past the source file's own come from a CDF part with
+        // its own material file (the M50 thruster's Housing on ORIG_M50.mtl),
+        // appended after the primary's: keep them, or their faces lose theirs.
+        for (material, &idx) in fallback_materials.materials.iter().zip(fallback_indices) {
+            if idx >= parsed_len {
+                original_indices.push(idx);
+                non_hidden.push(material.clone());
+            }
         }
         let canonical = MtlFile {
             materials: non_hidden,
