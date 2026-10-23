@@ -195,6 +195,48 @@ def _tinted_specular(submaterial: Any) -> tuple[float, float, float] | None:
     return tuple(c ** (1.0 / 2.2) for c in specular)
 
 
+def _public_param_triplet(submaterial: Any, name: str) -> tuple[float, float, float] | None:
+    raw = getattr(submaterial, "raw", None)
+    params = raw.get("authored_public_params") if isinstance(raw, dict) else None
+    for item in params or []:
+        if isinstance(item, dict) and item.get("name") == name:
+            try:
+                values = [float(v) for v in str(item.get("value")).split(",")]
+            except ValueError:
+                return None
+            return tuple(values[:3]) if len(values) >= 3 else None
+    return None
+
+
+def _scaled_specular(nodes: Any, socket: Any, specular: Any, *, x: int, y: int) -> Any:
+    """An Illum specular map times the authored Specular, as the engine does.
+
+    Read alone, the map (~0.6 on the 300 series' plastic panels) was the F0
+    and the metallic: the 350r's near-black hull (Specular 0.045) rendered
+    as brushed silver. The (1,1,1) metal placeholder keeps the map as is.
+    """
+    if socket is None or specular is None:
+        return socket
+    grey = sum(specular[:3]) / 3.0
+    if grey >= 0.99 or max(specular) - min(specular) > 0.05:
+        return socket
+    scale = nodes.new("ShaderNodeMath")
+    scale.operation = "MULTIPLY"
+    scale.label = "Specular x authored"
+    scale.location = (x, y)
+    nodes.id_data.links.new(socket, scale.inputs[0])
+    scale.inputs[1].default_value = grey
+    return scale.outputs[0]
+
+
+def _authored_shader_name(submaterial: Any) -> str:
+    raw = getattr(submaterial, "raw", None)
+    for item in (raw.get("authored_attributes") if isinstance(raw, dict) else None) or []:
+        if isinstance(item, dict) and item.get("name") == "Shader":
+            return str(item.get("value") or "").lower()
+    return ""
+
+
 class BuildersMixin:
     def _apply_uv_tiling(
         self,
@@ -415,7 +457,11 @@ class BuildersMixin:
             self._build_nodraw_material(material)
         elif submaterial.shader_family == "HardSurface":
             self._build_hard_surface_material(material, submaterial, palette, plan)
-        elif submaterial.shader_family == "Illum":
+        elif submaterial.shader_family == "Illum" or _authored_shader_name(submaterial) in ("cloth", "layer"):
+            # Cloth (the M50's seat mesh) and a Layer used as a surface (its
+            # Rubber tyres) have Illum's inputs: diffuse and normal maps
+            # tinted by the authored Diffuse. Built elsewhere, their
+            # near-black fabric and rubber drew as the bare white maps.
             self._build_illum_material(material, submaterial, palette, plan)
         else:
             group_contract = None if plan.template_key == "layered_wear" else self._group_contract_for_submaterial(submaterial)
@@ -1736,6 +1782,7 @@ class BuildersMixin:
             (_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0) if material_channel is not None else 0.0
         )
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
+        primary_specular = _scaled_specular(nodes, primary_specular, _authored_attribute_triplet(submaterial, "Specular"), x=-520, y=760)
         # A coloured F0 is a metal: the layer colour goes to the Specular.
         tinted_specular = _tinted_specular(submaterial)
         primary_alpha_source = (
@@ -1839,6 +1886,7 @@ class BuildersMixin:
             secondary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot13"), x=-720, y=-980)
             secondary_roughness, _secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
             secondary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot10"), x=-720, y=980)
+            secondary_specular = _scaled_specular(nodes, secondary_specular, _public_param_triplet(submaterial, "BlendLayer2SpecularColor"), x=-520, y=980)
             secondary = self._connect_layer_surface_group(
                 nodes,
                 links,
@@ -2661,11 +2709,14 @@ class BuildersMixin:
         priorities = ("primary", "secondary", "tertiary", "glass")
         slot_channels: dict[int, str] = {}
         slot_tints: dict[int, tuple[float, float, float]] = {}
+        host_slots: list[int] = []
         for slot_index, submaterial in enumerate(slot_submaterials):
             if submaterial is None or not self._submaterial_is_host_candidate(submaterial):
                 continue
+            host_slots.append(slot_index)
             channel = self._submaterial_palette_channel(submaterial)
-            if channel in priorities:
+            # Glass is never a decal's host (see _scan_slots_for_host_channel).
+            if channel in priorities and channel != "glass":
                 slot_channels[slot_index] = channel
             tint = self._submaterial_authored_tint_rgb(submaterial)
             if tint is not None:
@@ -2685,9 +2736,15 @@ class BuildersMixin:
             )
 
         if slot_tints:
+            counts = self._polygon_counts_by_material_index(obj)
+            # Tinted trims on a mesh whose panels carry no tint (the 350r's
+            # Illum hull, coloured by its palette input): leave the host to
+            # the built material's colour instead of a minor trim's tint.
+            tinted = sum(counts.get(i, 0) for i in slot_tints)
+            if tinted * 2 < sum(counts.get(i, 0) for i in host_slots):
+                return None, None
             if len(slot_tints) == 1:
                 return None, next(iter(slot_tints.values()))
-            counts = self._polygon_counts_by_material_index(obj)
             weighted_tints = [
                 (max(1, counts.get(slot_index, 0)), tint)
                 for slot_index, tint in slot_tints.items()
@@ -2770,7 +2827,9 @@ class BuildersMixin:
                     if f"_paint_{key}" in lname or f"paint_{key}" in lname:
                         channel = key
                         break
-            if channel is None:
+            # Glass is never a decal's host: on the 350r the canopy was the
+            # only routed slot, so the seam decals took its white tint.
+            if channel is None or channel == "glass":
                 continue
             slot_channels[index] = channel
 
@@ -2857,20 +2916,27 @@ class BuildersMixin:
             key=lambda i: counts.get(i, 0),
             reverse=True,
         )
+        candidates: list[tuple[int, tuple[float, float, float]]] = []
         for i in order:
             mat = slots[i].material
             if mat is None or mat.node_tree is None:
                 continue
-            if mat.get("starbreaker_shader_family") == "MeshDecal":
+            if mat.get("starbreaker_shader_family") == "MeshDecal" or mat.get("starbreaker_decal_host_rgb_key"):
                 continue
             rgb = self._read_paint_tint_rgb(mat)
             if rgb is not None:
-                if cache is not None and cache_key is not None:
-                    cache[cache_key] = rgb
-                return rgb
+                candidates.append((counts.get(i, 0), rgb))
+        # Seams sit on the panels, not the trims: of the materials covering
+        # at least half as much as the largest, take the darkest (the 350r
+        # nose is mostly tan metal_dark trim around near-black hull panels).
+        result = None
+        if candidates:
+            largest = candidates[0][0]
+            close = [rgb for count, rgb in candidates if count * 2 >= largest]
+            result = min(close, key=lambda rgb: 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2])
         if cache is not None and cache_key is not None:
-            cache[cache_key] = None
-        return None
+            cache[cache_key] = result
+        return result
 
     @staticmethod
     def _read_paint_tint_rgb(
@@ -2906,7 +2972,10 @@ class BuildersMixin:
                             continue
                         if rgb != (1.0, 1.0, 1.0):
                             return rgb
-        preferred = ("Tint Color", "Primary Color", "Base Color")
+        # Palette Color last: an Illum hull keeps its colour there with a
+        # white tint (the 350r's near-black panels), and without it the
+        # seam decals on top fell back to the white atlas.
+        preferred = ("Tint Color", "Primary Color", "Base Color", "Palette Color")
         fallback: tuple[float, float, float] | None = None
         for node in material.node_tree.nodes:
             if node.bl_idname != "ShaderNodeGroup":
@@ -3163,9 +3232,10 @@ class BuildersMixin:
                 continue
             shader_family = mat.get("starbreaker_shader_family")
             is_mesh_decal = shader_family == "MeshDecal"
+            is_relief = bool(mat.get(PROP_HAS_POM, False)) or self._is_illum_relief_decal(mat)
             is_illum_pom_decal = (
                 shader_family == "Illum"
-                and bool(mat.get(PROP_HAS_POM, False))
+                and is_relief
                 and mat.get(PROP_TEMPLATE_KEY) == "decal_stencil"
             )
             if not is_mesh_decal and not is_illum_pom_decal:
@@ -3173,7 +3243,7 @@ class BuildersMixin:
             # Host-tint rebinding is only meaningful for POM-family decal
             # overlays. Non-POM branding/text decals author their own
             # colour and must not be retinted by the host.
-            if not bool(mat.get(PROP_HAS_POM, False)):
+            if not is_relief:
                 continue
             decal_slots.append((slot, mat, is_mesh_decal))
         if not decal_slots:
@@ -3215,6 +3285,25 @@ class BuildersMixin:
                 slot.material = variant
                 rebound += 1
         return rebound
+
+    @staticmethod
+    def _is_illum_relief_decal(material: bpy.types.Material) -> bool:
+        """An Illum %DECAL with a normal map but no POM flag: a relief atlas
+        like the POM ones, its white diffuse meant to take the panel's colour.
+        The M50's Poms_EXT drew its seams and inset outlines bright white.
+        Branding decals carry no normal map and keep their own colours."""
+        raw = material.get(PROP_SUBMATERIAL_JSON) if hasattr(material, "get") else None
+        if not isinstance(raw, str):
+            return False
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return False
+        mask = ""
+        for attribute in parsed.get("authored_attributes", []) or []:
+            if (attribute or {}).get("name") == "StringGenMask":
+                mask = str(attribute.get("value") or "").upper()
+        return "%DECAL" in mask and "%NORMAL_MAP" in mask and "STENCIL_MAP" not in mask
 
     @staticmethod
     def _rgb_variant_key(rgb: tuple[float, float, float]) -> str:

@@ -280,7 +280,10 @@ class PaletteMixin:
             }
             expected_inputs = {"Image", "Decal Red Tint", "Decal Green Tint", "Decal Blue Tint"}
             expected_outputs = {"Color", "Alpha"}
-            has_map_range = any(node.bl_idname == "ShaderNodeMapRange" for node in group.nodes)
+            has_map_range = any(
+                node.bl_idname == "ShaderNodeMapRange" and getattr(node, "data_type", "") == "FLOAT_VECTOR"
+                for node in group.nodes
+            )
             channel_mix_nodes = [
                 node
                 for node in group.nodes
@@ -324,18 +327,21 @@ class PaletteMixin:
 
         map_range = group.nodes.new("ShaderNodeMapRange")
         map_range.location = (-360, 380)
+        # Per channel: a FLOAT range turned the stencil into its luminance, so
+        # every channel read the same value and the M50's black "M50" (green)
+        # came out white + black + red = pink.
         if hasattr(map_range, "data_type"):
-            map_range.data_type = "FLOAT"
+            map_range.data_type = "FLOAT_VECTOR"
         if hasattr(map_range, "clamp"):
             map_range.clamp = True
-        group.links.new(group_input.outputs["Image"], map_range.inputs["Value"])
-        group.links.new(map_range.outputs["Result"], separate_rgb.inputs[0])
+        group.links.new(group_input.outputs["Image"], map_range.inputs["Vector"])
+        group.links.new(map_range.outputs["Vector"], separate_rgb.inputs[0])
 
         separate_hsv = group.nodes.new("ShaderNodeSeparateColor")
         separate_hsv.location = (460, 60)
         if hasattr(separate_hsv, "mode"):
             separate_hsv.mode = "HSV"
-        group.links.new(map_range.outputs["Result"], separate_hsv.inputs[0])
+        group.links.new(map_range.outputs["Vector"], separate_hsv.inputs[0])
 
         red_mix = group.nodes.new("ShaderNodeMix")
         red_mix.label = "Red Mix"
