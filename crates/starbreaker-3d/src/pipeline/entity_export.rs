@@ -110,6 +110,17 @@ fn export_entity_payload_cached(
     let material_path = db
         .query_single::<String>(&mtl_compiled, record)?
         .unwrap_or_default();
+    let worn = opts
+        .worn_subgeometry_tag
+        .as_deref()
+        .and_then(|tag| super::worn_subgeometry(db, record, tag));
+    let (geometry_path, material_path) = match &worn {
+        Some(w) => (
+            w.geometry.clone(),
+            if w.material.is_empty() { material_path } else { w.material.clone() },
+        ),
+        None => (geometry_path, material_path),
+    };
     // The CDF parts named here wear the entity's material instead of their
     // own: the ATLS IKTI Nine Tails sets argo_atls_powersuit_9tails.mtl for
     // its trunk, arms and legs, whose CDF attachments name the plain suit.
@@ -148,7 +159,7 @@ fn export_entity_payload_cached(
         ));
     }
 
-    let palette = query_tint_palette(db, record);
+    let palette = worn.and_then(|w| w.palette).or_else(|| query_tint_palette(db, record));
     Ok((
         mesh,
         mtl_file,
