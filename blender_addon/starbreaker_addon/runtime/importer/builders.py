@@ -2176,9 +2176,26 @@ class BuildersMixin:
         textures = representative_textures(submaterial)
 
         # Base image (primary diffuse).
-        base_image_node = self._image_node(
-            nodes, textures["base_color"], x=-280, y=220, is_color=True
+        # A layer's diffuse repeats at the layer's UV tiling. Sampled once,
+        # the FR-66 shield's painted_surface_02 (12-66x) spread one grain
+        # over each part and the paint looked washed out.
+        base_source_layer = next(
+            (
+                layer
+                for layer in submaterial.layer_manifest
+                if textures["base_color"] and layer.diffuse_export_path == textures["base_color"]
+                and not (layer.name or "").lower().startswith("wearlayer")
+            ),
+            None,
         )
+        if base_source_layer is not None:
+            base_image_node = self._layer_blend_image(
+                nodes, links, textures["base_color"], float(base_source_layer.uv_tiling or 1.0), True, -280, 220
+            )
+        else:
+            base_image_node = self._image_node(
+                nodes, textures["base_color"], x=-280, y=220, is_color=True
+            )
         if base_image_node is not None:
             base_image_socket = _input_socket(layered_group, "Base Image")
             if base_image_socket is not None:
@@ -2236,12 +2253,14 @@ class BuildersMixin:
                 else _layered_wear_first_diffuse_layer(submaterial)
             )
             if image_source_layer is not None and image_source_layer.diffuse_export_path:
-                fallback_image_node = self._image_node(
+                fallback_image_node = self._layer_blend_image(
                     nodes,
+                    links,
                     image_source_layer.diffuse_export_path,
-                    x=-280,
-                    y=220,
-                    is_color=True,
+                    float(image_source_layer.uv_tiling or 1.0),
+                    True,
+                    -280,
+                    220,
                 )
                 if fallback_image_node is not None:
                     fallback_target = _input_socket(layered_group, "Base Image")
@@ -2275,8 +2294,8 @@ class BuildersMixin:
             )
         if wear_layer is not None:
             if wear_layer.diffuse_export_path:
-                layer_image_node = self._image_node(
-                    nodes, wear_layer.diffuse_export_path, x=-280, y=-140, is_color=True
+                layer_image_node = self._layer_blend_image(
+                    nodes, links, wear_layer.diffuse_export_path, float(wear_layer.uv_tiling or 1.0), True, -280, -140
                 )
                 if layer_image_node is not None:
                     target = _input_socket(layered_group, "Layer Image")
@@ -3472,7 +3491,49 @@ class BuildersMixin:
         for attribute in parsed.get("authored_attributes", []) or []:
             if (attribute or {}).get("name") == "StringGenMask":
                 mask = str(attribute.get("value") or "").upper()
-        return "%DECAL" in mask and "%NORMAL_MAP" in mask and "STENCIL_MAP" not in mask
+        if not ("%DECAL" in mask and "%NORMAL_MAP" in mask and "STENCIL_MAP" not in mask):
+            return False
+        # A normal map is not enough: the RSI quantum drives' decal sheet
+        # (qdrv_smal_decals_a, RSI logo, warning labels, maker logos) has one
+        # too and printed near-black in the host colour. A relief atlas's
+        # diffuse is grey; a printed one is coloured.
+        return not BuildersMixin._decal_diffuse_is_coloured(material)
+
+    _COLOURED_DECAL_CACHE: dict[str, bool] = {}
+
+    @staticmethod
+    def _decal_diffuse_is_coloured(material: bpy.types.Material) -> bool:
+        """True when the material's colour image has saturated texels: the
+        mean chroma (max - min channel) over its opaque texels is above 0.08."""
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return False
+        for node in node_tree.nodes:
+            image = getattr(node, "image", None) if node.bl_idname == "ShaderNodeTexImage" else None
+            if image is None or image.colorspace_settings.name == "Non-Color":
+                continue
+            key = bpy.path.abspath(image.filepath, library=image.library) or image.name
+            cached = BuildersMixin._COLOURED_DECAL_CACHE.get(key)
+            if cached is None:
+                cached = False
+                try:
+                    import numpy as np
+
+                    width, height = image.size
+                    if width and height:
+                        pixels = np.empty(width * height * 4, dtype=np.float32)
+                        image.pixels.foreach_get(pixels)
+                        pixels = pixels.reshape(-1, 4)[:: max(1, (width * height) // 65536)]
+                        opaque = pixels[pixels[:, 3] > 0.5]
+                        if len(opaque):
+                            chroma = opaque[:, :3].max(axis=1) - opaque[:, :3].min(axis=1)
+                            cached = float(chroma.mean()) > 0.08
+                except Exception:
+                    cached = False
+                BuildersMixin._COLOURED_DECAL_CACHE[key] = cached
+            if cached:
+                return True
+        return False
 
     @staticmethod
     def _rgb_variant_key(rgb: tuple[float, float, float]) -> str:
