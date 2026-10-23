@@ -146,6 +146,28 @@ def _is_switched_off_decal(submaterial: SubmaterialRecord) -> bool:
     return not any(isinstance(item, dict) and item.get("name") == "Opacity" for item in attributes)
 
 
+def _is_glow_only_decal(submaterial: SubmaterialRecord) -> bool:
+    """An Illum %DECAL with DecalDiffuseOpacity 0 and no normal or POM map.
+
+    It adds no colour and no relief, only the glow a running engine gives
+    it, so with the engines off it is not seen: the Hornet Mk II's retro
+    thruster `engine_flame` printed solid blue in its intakes, the main
+    thruster's `engine_glow` a black disc over the nozzle.
+    """
+    flags = submaterial.decoded_feature_flags
+    if not flags.has_decal or flags.has_parallax_occlusion_mapping or submaterial.shader_family != "Illum":
+        return False
+    raw = submaterial.raw if isinstance(submaterial.raw, dict) else {}
+    params = {item.get("name"): item.get("value") for item in raw.get("authored_public_params") or [] if isinstance(item, dict)}
+    try:
+        if float(params.get("DecalDiffuseOpacity", "1")) != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    textures = [str(t.get("export_path") or "").lower() for t in raw.get("direct_textures") or [] if isinstance(t, dict)]
+    return not any("_ddn" in t or "_nrm" in t for t in textures)
+
+
 def _base_template_plan(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     family = submaterial.shader_family
     flags = submaterial.decoded_feature_flags
@@ -153,6 +175,8 @@ def _base_template_plan(submaterial: SubmaterialRecord) -> MaterialTemplatePlan:
     if family == "NoDraw":
         return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
     if _is_empty_livery_decal(submaterial):
+        return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
+    if _is_glow_only_decal(submaterial):
         return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
     if _is_switched_off_decal(submaterial):
         return MaterialTemplatePlan("nodraw", "NoDraw", "CLIP", "NONE", False, False, False, False, False, True)
