@@ -816,13 +816,27 @@ pub(crate) fn resolve_geometry_files(
     let root = xml.root();
     let mut parts = Vec::new();
     let mut skeleton_path = None;
+    let mut model_part = None;
 
     for child in xml.node_children(root) {
         if xml.node_tag(child) == "Model" {
             let attrs: std::collections::HashMap<&str, &str> =
                 xml.node_attributes(child).collect();
             if let Some(&file) = attrs.get("File") {
-                if !file.is_empty() {
+                let lower = file.to_lowercase();
+                if lower.ends_with(".cga") || lower.ends_with(".cgf") {
+                    // Newer FPS weapons (HDGW Arlington) wrap their mesh in
+                    // a CDF: the Model is the gun itself, not a skeleton, and
+                    // the attachment list holds only empty bone sockets.
+                    // Skeleton loading falls back to the primary part.
+                    model_part = Some(GeometryPart {
+                        path: file.to_string(),
+                        bone_name: None,
+                        material_override: None,
+                        attach_rotation: IDENTITY_QUAT,
+                        attach_position: [0.0; 3],
+                    });
+                } else if !file.is_empty() {
                     skeleton_path = Some(file.to_string());
                 }
             }
@@ -860,6 +874,9 @@ pub(crate) fn resolve_geometry_files(
         }
     }
 
+    if let Some(part) = model_part {
+        parts.insert(0, part);
+    }
     if parts.is_empty() {
         return Err(Error::Other(format!(
             "CDF {geometry_path} has no attachments"
