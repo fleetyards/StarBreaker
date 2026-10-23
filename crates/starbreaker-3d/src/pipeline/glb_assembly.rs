@@ -89,6 +89,16 @@ pub fn assemble_glb_with_loadout_with_progress(
     ) = export_entity_payload(db, p4k, record, &payload_opts)?;
     log::info!("[timing] export_entity_payload: {:.2}s", phase_start.elapsed().as_secs_f32());
     
+    // A CDF names no node table of its own; the payload's places the parts
+    // of its mesh (the P4-AR's parts.skin split per bone and rebased, the
+    // HDGW Arlington's CGA nodes). Written flat, they hung around the origin;
+    // handed on as the root's table, mounted items attached to its nodes
+    // (magazines at magAttach) moved a second time. Baked into the vertices,
+    // the mesh is whole and the root stays as the record describes it.
+    let root_mesh = match (resolved.nmc.as_ref(), payload_nmc.as_ref()) {
+        (None, Some(nmc)) => super::bake_nmc_into_mesh(root_mesh, Some(nmc), false),
+        _ => root_mesh,
+    };
     let root_animation_controller = query_animation_controller_source(db, record);
     if let Some(palette) = root_palette.as_mut() {
         populate_palette_display_name(palette, &paint_display_names);
@@ -405,7 +415,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             material_path: material_path.clone(),
             root_mesh,
             root_materials: root_mtl,
-            root_nmc: resolved.nmc.or(payload_nmc),
+            root_nmc: resolved.nmc,
             root_palette: root_palette.clone(),
             available_palettes,
             root_bones,
@@ -448,7 +458,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             root_mesh: Some(root_mesh),
             root_materials: root_mtl,
             root_textures: root_tex,
-            root_nmc: resolved.nmc.or(payload_nmc),
+            root_nmc: resolved.nmc,
             root_palette: root_palette.clone(),
             skeleton_bones: root_bones,
             children: child_payloads,
