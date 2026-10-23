@@ -110,6 +110,18 @@ fn export_entity_payload_cached(
     let material_path = db
         .query_single::<String>(&mtl_compiled, record)?
         .unwrap_or_default();
+    // The CDF parts named here wear the entity's material instead of their
+    // own: the ATLS IKTI Nine Tails sets argo_atls_powersuit_9tails.mtl for
+    // its trunk, arms and legs, whose CDF attachments name the plain suit.
+    let material_attachments: Vec<String> = db
+        .compile_path::<String>(
+            record.struct_id(),
+            "Components[SGeometryResourceParams].Geometry.Geometry.MaterialAttachments",
+        )
+        .ok()
+        .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
+        .map(|list| list.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty()).collect())
+        .unwrap_or_default();
 
     let (
         mesh,
@@ -120,7 +132,7 @@ fn export_entity_payload_cached(
         primary_path,
         skeleton_source_path,
     ) =
-        load_geometry_parts(p4k, &geometry_path, &material_path, opts, png_cache, false)?;
+        load_geometry_parts(p4k, &geometry_path, &material_path, &material_attachments, opts, png_cache, false)?;
 
     if !opts.material_mode.include_materials() {
         return Ok((
@@ -169,7 +181,7 @@ pub(crate) fn export_entity_from_paths_cached(
     use_model_bbox: bool,
 ) -> Result<EntityPayload, Error> {
     let (mesh, mtl_file, textures, nmc, skeleton_bones, primary_path, skeleton_source_path) =
-        load_geometry_parts(p4k, geometry_path, material_path, opts, png_cache, use_model_bbox)?;
+        load_geometry_parts(p4k, geometry_path, material_path, &[], opts, png_cache, use_model_bbox)?;
 
     if !opts.material_mode.include_materials() {
         return Ok((
@@ -204,6 +216,7 @@ fn load_geometry_parts(
     p4k: &MappedP4k,
     geometry_path: &str,
     material_path: &str,
+    material_attachments: &[String],
     opts: &ExportOptions,
     png_cache: &mut PngCache,
     use_model_bbox: bool,
@@ -236,10 +249,19 @@ fn load_geometry_parts(
         }
     }
 
-    let effective_material = resolved.parts[0]
-        .material_override
-        .as_deref()
-        .unwrap_or(material_path);
+    let part_material = |part: &GeometryPart| -> String {
+        let listed = !material_path.is_empty()
+            && part.name.as_deref().is_some_and(|name| {
+                material_attachments.iter().any(|listed| listed.eq_ignore_ascii_case(name))
+            });
+        if listed {
+            material_path.to_string()
+        } else {
+            part.material_override.clone().unwrap_or_else(|| material_path.to_string())
+        }
+    };
+    let effective_material = part_material(&resolved.parts[0]);
+    let effective_material = effective_material.as_str();
     let (mut mesh, mut mtl_file, textures, mut nmc) =
         load_single_mesh(p4k, &primary_path, effective_material, opts, png_cache, use_model_bbox)?;
     remap_skin_joints_to_skeleton(p4k, &mut mesh, &primary_path, &skeleton_bones);
@@ -253,9 +275,10 @@ fn load_geometry_parts(
 
     // Merge additional parts (CA_BONE/CA_SKIN attachments from CDF).
     let no_tex_opts = ExportOptions { material_mode: MaterialMode::Colors, ..opts.clone() };
+    let mut appended: Vec<(Option<String>, u32)> = Vec::new();
     for part in &resolved.parts[1..] {
-        let part_material = part.material_override.as_deref().unwrap_or(material_path);
-        match load_single_mesh(p4k, &part.path, part_material, &no_tex_opts, png_cache, use_model_bbox) {
+        let part_material = part_material(part);
+        match load_single_mesh(p4k, &part.path, &part_material, &no_tex_opts, png_cache, use_model_bbox) {
             Ok((mut extra_mesh, extra_mtl, _, extra_nmc)) => {
                 // The part's own CGA nodes place its geometry; merged into
                 // the primary, their transforms would be lost. The M50
@@ -267,10 +290,19 @@ fn load_geometry_parts(
                 // submaterials and shift the part's ids past the primary's.
                 // Left pointing into the primary file, its faces had no
                 // material and the decomposed export dropped them.
+                // Parts sharing one file share one copy: the ATLS Nine Tails
+                // has five parts on the plain suit file, appended five times.
                 if let (Some(own), Some(extra)) = (mtl_file.as_mut(), extra_mtl) {
                     if part.material_override.is_some() && extra.source_path != own.source_path {
-                        let base = own.materials.len() as u32;
-                        own.materials.extend(extra.materials);
+                        let base = match appended.iter().find(|(path, _)| *path == extra.source_path) {
+                            Some((_, base)) => *base,
+                            None => {
+                                let base = own.materials.len() as u32;
+                                appended.push((extra.source_path.clone(), base));
+                                own.materials.extend(extra.materials);
+                                base
+                            }
+                        };
                         for submesh in &mut extra_mesh.submeshes {
                             submesh.material_id += base;
                             if let Some(source) = submesh.source_material_id.as_mut() {
@@ -763,6 +795,8 @@ pub(crate) fn rebase_mesh_submeshes_to_bone_space(
 /// A single geometry file to load, with optional bone attachment info.
 pub(crate) struct GeometryPart {
     pub(crate) path: String,
+    /// CDF attachment name (`AName`), matched against the entity's MaterialAttachments.
+    pub(crate) name: Option<String>,
     /// Bone name from CDF attachment (for CA_BONE placement). None for CA_SKIN.
     pub(crate) bone_name: Option<String>,
     /// Material override from CDF attachment. Takes priority over the DataCore material.
@@ -793,6 +827,7 @@ pub(crate) fn resolve_geometry_files(
         return Ok(ResolvedGeometry {
             parts: vec![GeometryPart {
                 path: geometry_path.to_string(),
+                name: None,
                 bone_name: None,
                 material_override: None,
                 attach_rotation: IDENTITY_QUAT,
@@ -831,6 +866,7 @@ pub(crate) fn resolve_geometry_files(
                     // Skeleton loading falls back to the primary part.
                     model_part = Some(GeometryPart {
                         path: file.to_string(),
+                        name: None,
                         bone_name: None,
                         material_override: None,
                         attach_rotation: IDENTITY_QUAT,
@@ -855,6 +891,7 @@ pub(crate) fn resolve_geometry_files(
                         // the skeleton's coordinate space and merge at origin.
                         parts.push(GeometryPart {
                             path: binding.to_string(),
+                            name: attrs.get("AName").map(|s| s.to_string()),
                             bone_name: attrs.get("BoneName").map(|s| s.to_string()),
                             material_override: attrs.get("Material")
                                 .filter(|s| !s.is_empty())
