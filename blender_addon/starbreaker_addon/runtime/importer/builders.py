@@ -153,6 +153,13 @@ def _layer_metal_tint(layer: LayerManifestEntry) -> tuple[float, float, float] |
     specular = _triplet_from_any(layer.layer_snapshot.get("specular"))
     if specular is None or all(abs(channel - 1.0) < 1e-6 for channel in specular):
         return tint
+    # A near-black tint is unset on a metal: the Hurston Attrition's copper
+    # rails (weapon_copper_striped_01, tint 0.026/0.045/0.061) are bright
+    # copper in the game and drew black. A real tint is brighter -- the Zeus
+    # visor's 0.07/0.02/1.0 turns its gold violet, the Ghost Mk II's 0.138
+    # greys its aluminium.
+    if max(tint) < 0.1:
+        return specular
     return tuple(t * s for t, s in zip(tint, specular))  # type: ignore[return-value]
 
 
