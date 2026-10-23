@@ -79,6 +79,33 @@ from .utils import (
 )
 
 
+def _aligned_index(authored: MaterialSidecar, target: MaterialSidecar, index: int) -> int | None:
+    """Position in `target` of the authored file's slot `index`, when the
+    two files differ by inserted slots but agree around it.
+
+    The nearest slots before and after it that both files name once must be
+    shifted by the same amount; the slot sits that far over. The Ghost Mk I's
+    file inserts vinplates, RTT and SubMtl27-31 into the F7C's layout and
+    renames glass_interior glass_int: the shared cockpit glass fell back to
+    its own index and rendered as hull paint.
+    """
+    def unique(sidecar: MaterialSidecar) -> dict[str, int]:
+        seen: dict[str, list[int]] = {}
+        for sub in sidecar.submaterials:
+            seen.setdefault(sub.submaterial_name.strip(), []).append(sub.index)
+        return {name: idx[0] for name, idx in seen.items() if len(idx) == 1 and name.strip("-")}
+
+    in_authored, in_target = unique(authored), unique(target)
+    common = sorted((i, in_target[name] - i) for name, i in in_authored.items() if name in in_target)
+    before = [shift for i, shift in common if i < index]
+    after = [shift for i, shift in common if i > index]
+    if not before or not after or before[-1] != after[0]:
+        return None
+    target_names = {sub.index: sub.submaterial_name.strip() for sub in target.submaterials}
+    aligned = index + before[-1]
+    return aligned if target_names.get(aligned, "").strip("-") else None
+
+
 class OrchestrationMixin:
     def __init__(
         self,
@@ -261,13 +288,21 @@ class OrchestrationMixin:
         canonical = _canonical_source_name(slot_name)
         folder, _, filename = sidecar_path.replace("\\", "/").rpartition("/")
         suffix = filename[filename.find("_TEX"):] if "_TEX" in filename else "_TEX0.materials.json"
-        authored_path = "%s/%s%s" % (folder, stem, suffix) if folder else stem + suffix
-        if authored_path.lower() == sidecar_path.replace("\\", "/").lower():
-            return None
-        try:
-            authored = self.package.load_material_sidecar(authored_path)
-        except Exception:
-            authored = None
+        # The authored file can sit a folder up: the Ghost Mk I's
+        # Hornet/F7C_S file against the F7C's Hornet/ANVL_Hornet.
+        authored = None
+        parts = folder.split("/") if folder else []
+        for depth in range(len(parts), max(len(parts) - 3, 0) - 1, -1):
+            base = "/".join(parts[:depth])
+            authored_path = "%s/%s%s" % (base, stem, suffix) if base else stem + suffix
+            if authored_path.lower() == sidecar_path.replace("\\", "/").lower():
+                return None
+            try:
+                authored = self.package.load_material_sidecar(authored_path)
+            except Exception:
+                authored = None
+            if authored is not None:
+                break
         if authored is None:
             return None
         matches = [sub for sub in authored.submaterials if sub.submaterial_name.strip() == canonical]
@@ -282,8 +317,10 @@ class OrchestrationMixin:
             target = self.package.load_material_sidecar(sidecar_path)
         except Exception:
             target = None
-        if target is None or len(target.submaterials) != len(authored.submaterials):
+        if target is None:
             return None
+        if len(target.submaterials) != len(authored.submaterials):
+            return _aligned_index(authored, target, matches[0].index)
         target_names = {sub.index: sub.submaterial_name.strip() for sub in target.submaterials}
         same = sum(1 for sub in authored.submaterials if target_names.get(sub.index) == sub.submaterial_name.strip())
         if same < 0.5 * len(authored.submaterials):
