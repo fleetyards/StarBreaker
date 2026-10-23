@@ -151,6 +151,7 @@ pub fn load_invisible_ports(
 ) -> std::collections::HashSet<String> {
     let mut invisible = std::collections::HashSet::new();
 
+    let modification = vehicle_modification_name(db, record);
     for (data, is_modification) in vehicle_xml_bytes(db, p4k, record) {
         if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
             if is_modification {
@@ -158,6 +159,16 @@ pub fn load_invisible_ports(
                 collect_invisible_ports_from_xml_override(&xml, xml.root(), &mut invisible);
             } else {
                 collect_invisible_ports_from_xml(&xml, xml.root(), &mut invisible);
+                // A modification can also patch the base in place, by element
+                // id: the Terrapin Medic turns its roof cap and light bar ports
+                // from "invisible uneditable" to "uneditable" that way.
+                for (part_name, flags) in inline_modification_port_flags(&xml, &modification) {
+                    if flags.split_whitespace().any(|f| f == "invisible") {
+                        invisible.insert(part_name);
+                    } else {
+                        invisible.remove(&part_name);
+                    }
+                }
             }
         }
     }
@@ -211,12 +222,77 @@ pub fn load_vehicle_port_flags(
     }
 
     let mut flags = std::collections::HashMap::new();
-    for (data, _) in vehicle_xml_bytes(db, p4k, record) {
+    let modification = vehicle_modification_name(db, record);
+    for (data, is_modification) in vehicle_xml_bytes(db, p4k, record) {
         if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
             walk(&xml, xml.root(), &mut flags);
+            if !is_modification {
+                // The base XML's own <Modification> patches (Terrapin Medic
+                // roof cap: "invisible uneditable" -> "uneditable").
+                for (part_name, port_flags) in inline_modification_port_flags(&xml, &modification) {
+                    flags.insert(part_name.to_ascii_lowercase(), port_flags);
+                }
+            }
         }
     }
     flags
+}
+
+fn vehicle_modification_name(db: &Database, record: &Record) -> String {
+    db.compile_path::<String>(record.struct_id(), "Components[VehicleComponentParams].modification")
+        .ok()
+        .and_then(|c| db.query_single::<String>(&c, record).ok().flatten())
+        .unwrap_or_default()
+}
+
+/// `(part name, new flags)` for every `<Elem idRef=.. name="flags" value=..>`
+/// of the named `<Modification>` inside a base vehicle XML whose `idRef` is
+/// an `<ItemPort>` id.
+fn inline_modification_port_flags(xml: &starbreaker_cryxml::CryXml, modification: &str) -> Vec<(String, String)> {
+    fn attr<'a>(xml: &'a starbreaker_cryxml::CryXml, node: &starbreaker_cryxml::CryXmlNode, key: &str) -> &'a str {
+        xml.node_attributes(node).find(|(k, _)| *k == key).map(|(_, v)| v).unwrap_or("")
+    }
+    fn ports(xml: &starbreaker_cryxml::CryXml, node: &starbreaker_cryxml::CryXmlNode, out: &mut std::collections::HashMap<String, String>) {
+        if xml.node_tag(node) == "Part" {
+            let part = attr(xml, node, "name");
+            for child in xml.node_children(node) {
+                let id = attr(xml, child, "id");
+                if xml.node_tag(child) == "ItemPort" && !id.is_empty() && !part.is_empty() {
+                    out.insert(id.to_string(), part.to_string());
+                }
+            }
+        }
+        for child in xml.node_children(node) {
+            ports(xml, child, out);
+        }
+    }
+    fn elems(
+        xml: &starbreaker_cryxml::CryXml,
+        node: &starbreaker_cryxml::CryXmlNode,
+        modification: &str,
+        inside: bool,
+        port_ids: &std::collections::HashMap<String, String>,
+        out: &mut Vec<(String, String)>,
+    ) {
+        let tag = xml.node_tag(node);
+        let inside = inside || (tag == "Modification" && attr(xml, node, "name").eq_ignore_ascii_case(modification));
+        if inside && tag == "Elem" && attr(xml, node, "name") == "flags" {
+            if let Some(part) = port_ids.get(attr(xml, node, "idRef")) {
+                out.push((part.clone(), attr(xml, node, "value").to_string()));
+            }
+        }
+        for child in xml.node_children(node) {
+            elems(xml, child, modification, inside, port_ids, out);
+        }
+    }
+    let mut out = Vec::new();
+    if modification.is_empty() {
+        return out;
+    }
+    let mut port_ids = std::collections::HashMap::new();
+    ports(xml, xml.root(), &mut port_ids);
+    elems(xml, xml.root(), modification, false, &port_ids, &mut out);
+    out
 }
 
 /// Walk a vehicle XML recursively collecting port names with `invisible` in flags.
