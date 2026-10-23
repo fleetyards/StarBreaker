@@ -166,6 +166,30 @@ def _layer_metal_tint(layer: LayerManifestEntry) -> tuple[float, float, float] |
     return tuple(t * s for t, s in zip(tint, specular))  # type: ignore[return-value]
 
 
+def _texture_reference_uv_scale(ref: TextureReference) -> tuple[float, float] | None:
+    """The slot's authored TexMod TileU/TileV, or None without one."""
+    scale = (ref.texture_transform or {}).get("scale")
+    if isinstance(scale, (list, tuple)) and len(scale) == 2:
+        try:
+            u, v = float(scale[0]), float(scale[1])
+        except (TypeError, ValueError):
+            return None
+        if u > 0.0 and v > 0.0:
+            return u, v
+    return None
+
+
+def _illum_base_uv_scale(submaterial: SubmaterialRecord) -> tuple[float, float]:
+    """Illum's base UV tiling: the diffuse slot's TexMod, else the normal's."""
+    for slot in ("TexSlot1", "TexSlot2"):
+        for ref in submaterial.texture_slots:
+            if ref.slot == slot:
+                scale = _texture_reference_uv_scale(ref)
+                if scale is not None:
+                    return scale
+    return 1.0, 1.0
+
+
 def _clamp_unit_float(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -1099,6 +1123,13 @@ class BuildersMixin:
                         # game's angle falloff, not an opacity: Polaris Decal_Dirt (128)
                         # turned faint dirt runs into opaque black rectangles.
                         resolved = min(float(resolved), 1.0)
+                    if param_key == "damageperobjectwear":
+                        # The authored value scales the object's wear state,
+                        # which is 0 on a new item. Taken as the wear itself it
+                        # mixed every MeshDecal 50% towards the white wear
+                        # colour: the ATLS "08" plate printed light grey, not
+                        # black, and the Nine Tails oni mask a white patch.
+                        resolved = 0.0
                     if resolved is not None:
                         try:
                             target_socket.default_value = resolved
@@ -2057,7 +2088,56 @@ class BuildersMixin:
                         target_image_nodes=illum_targets,
                         scale_value=illum_pom_scale,
                         bias_value=self._parallax_bias_value(submaterial),
+                        uv_tile=_illum_base_uv_scale(submaterial)[0],
                     )
+
+        self._apply_illum_slot_tiling(material, submaterial)
+
+    def _apply_illum_slot_tiling(self, material: bpy.types.Material, submaterial: SubmaterialRecord) -> None:
+        """Scale the UVs of the Illum maps by their authored TexMod tiling.
+
+        CryEngine's Illum reads every main map at the diffuse slot's TexMod
+        tiling, the blend layer at that times BlendLayer2Tiling and the blend
+        mask times BlendMaskTiling, unless a slot has its own TexMod. Read at
+        1x, the Hull C's grav plates (TexSlot1 tiled 30x) drew their triangle
+        pattern across the whole cargo grid. Samplers already fed (POM, which
+        tiles internally) and the detail maps, tiled by their own path, stay.
+        """
+        base = _illum_base_uv_scale(submaterial)
+        layer2 = _optional_float_public_param(submaterial, "BlendLayer2Tiling") or 1.0
+        mask = _optional_float_public_param(submaterial, "BlendMaskTiling") or 1.0
+        factors = {"TexSlot3": layer2, "TexSlot9": layer2, "TexSlot10": layer2, "TexSlot11": layer2, "TexSlot12": mask}
+        scales: dict[str, tuple[float, float]] = {}
+        for ref in submaterial.texture_slots:
+            if not ref.export_path or ref.slot in (None, "TexSlot6", "TexSlot13"):
+                continue
+            own = _texture_reference_uv_scale(ref)
+            factor = factors.get(ref.slot, 1.0)
+            scale = own if own is not None else (base[0] * factor, base[1] * factor)
+            resolved = self.package.resolve_path(ref.export_path)
+            if resolved is not None:
+                scales.setdefault(str(resolved), scale)
+        if not scales:
+            return
+        nodes = material.node_tree.nodes
+        links = material.node_tree.links
+        for node in list(nodes):
+            if node.bl_idname != "ShaderNodeTexImage" or node.image is None:
+                continue
+            vector_input = node.inputs.get("Vector")
+            if vector_input is None or vector_input.is_linked:
+                continue
+            scale = scales.get(bpy.path.abspath(node.image.filepath, library=node.image.library))
+            if scale is None or (abs(scale[0] - 1.0) < 1e-4 and abs(scale[1] - 1.0) < 1e-4):
+                continue
+            tex_coord = nodes.new("ShaderNodeTexCoord")
+            tex_coord.location = (node.location.x - 440, node.location.y)
+            mapping = nodes.new("ShaderNodeMapping")
+            mapping.location = (node.location.x - 220, node.location.y)
+            mapping.vector_type = "POINT"
+            mapping.inputs["Scale"].default_value = (scale[0], scale[1], 1.0)
+            links.new(tex_coord.outputs["UV"], mapping.inputs["Vector"])
+            links.new(mapping.outputs["Vector"], vector_input)
 
 
     def _build_nodraw_material(self, material: bpy.types.Material) -> None:

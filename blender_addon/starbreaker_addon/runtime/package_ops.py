@@ -477,6 +477,13 @@ def _material_refresh_palette_id(
     sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
     if sidecar_path is None:
         return None
+    # A part on the ship's own exterior material file follows the ship's
+    # paint: that file's DefaultPalette names one variant only (the Zeus file
+    # says rsi_zeus_es, so the CL's cargo pods, ramp and turret came out in
+    # the ES grey).
+    exterior = _exterior_material_sidecars(package) if getattr(package, "liveries", None) else None
+    if exterior is not None and sidecar_path in exterior and package.scene.root_entity.palette_id:
+        return package.scene.root_entity.palette_id
     if default_palette_cache is not None and sidecar_path in default_palette_cache:
         return default_palette_cache[sidecar_path]
     palette_id = _sidecar_default_palette_id(package, sidecar_path)

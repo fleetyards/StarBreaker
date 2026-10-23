@@ -44,6 +44,12 @@ def _is_empty_livery_decal(submaterial: SubmaterialRecord) -> bool:
         return False
     # Only the livery slot counts a missing base colour as empty: other
     # livery decals (`livery`) draw from the palette's decal texture.
+    # A livery slot stencilled from the palette's decal texture has something
+    # to draw: the Dragonfly's DRAKE INTERPLANETARY on its rear nacelles.
+    if is_livery_slot and submaterial.decoded_feature_flags.has_stencil_map and any(
+        slot.role == "tint_palette_decal" for slot in submaterial.texture_slots
+    ):
+        return False
     if (
         is_livery_slot
         and submaterial.activation_state != "active"

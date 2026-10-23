@@ -334,6 +334,15 @@ class PaletteMixin:
             map_range.data_type = "FLOAT_VECTOR"
         if hasattr(map_range, "clamp"):
             map_range.clamp = True
+        # The stencils are 1024 px masks stretched over whole panels (the
+        # Pulse LX's MIRAI letters): read 0-1 their edges blur over
+        # centimetres. Thresholded low (0.2-0.4, the Ursa's soft lettering
+        # thinned to hairlines cut at the half) they cut clean.
+        for socket in map_range.inputs:
+            if socket.enabled and socket.type == "VECTOR" and socket.name == "From Min":
+                socket.default_value = (0.2, 0.2, 0.2)
+            elif socket.enabled and socket.type == "VECTOR" and socket.name == "From Max":
+                socket.default_value = (0.4, 0.4, 0.4)
         group.links.new(group_input.outputs["Image"], map_range.inputs["Vector"])
         group.links.new(map_range.outputs["Vector"], separate_rgb.inputs[0])
 
@@ -494,6 +503,11 @@ class PaletteMixin:
             group.nodes, palette_decal_texture(palette), x=-900, y=-520, is_color=True
         )
         if palette_decal_node is not None:
+            # The stencil's channels are masks and its alpha is often 0
+            # everywhere: read as straight alpha, the Zeus logos came out
+            # black (transparent colour).
+            if palette_decal_node.image is not None:
+                palette_decal_node.image.alpha_mode = "CHANNEL_PACKED"
             decal_uv_socket = group_input.outputs.get("Decal UV")
             decal_vector_socket = palette_decal_node.inputs.get("Vector")
             if decal_uv_socket is not None and decal_vector_socket is not None:

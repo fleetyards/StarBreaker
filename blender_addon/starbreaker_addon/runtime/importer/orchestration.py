@@ -251,6 +251,59 @@ class OrchestrationMixin:
         self.sidecar_submaterials_by_name[cache_key] = indexed
         return indexed
 
+    def _compact_slot_submaterial(
+        self,
+        obj: bpy.types.Object,
+        sidecar_path: str,
+        sidecar: MaterialSidecar,
+        slot_name: str,
+    ) -> SubmaterialRecord | None:
+        """The submaterial a slot of a repeated name stands for, by its id.
+
+        Slot names end in the mesh file's material id
+        (`mrai_pulse_a_mtl_tintable_024`), which counts only the materials that
+        geometry file uses, in material-file order. Walking one file's slot ids
+        in order against the submaterials pairs each repeated name with its
+        own entry: the Pulse's 15 `tintable` submaterials (primary, secondary,
+        tertiary) all bound to the first, a secondary, and its red top cowl
+        rendered navy.
+        """
+        # The prefix is the file the mesh was authored with, which a paint's
+        # file can differ from (the Pulse's housing names mrai_pulse_b).
+        base = slot_name[:-4] if len(slot_name) > 4 and slot_name[-4] == "." and slot_name[-3:].isdigit() else slot_name
+        if "_mtl_" not in base:
+            return None
+        prefix = (base.rsplit("_mtl_", 1)[0] + "_mtl_").lower()
+        parsed = _compact_slot_key(slot_name, prefix)
+        if parsed is None:
+            return None
+        asset = str(obj.get("starbreaker_mesh_asset", "") or "")
+        cache_key = (sidecar_path, asset, prefix)
+        cache = getattr(self, "compact_slot_cache", None)
+        if cache is None:
+            cache = self.compact_slot_cache = {}
+        mapping = cache.get(cache_key)
+        if mapping is None:
+            slots = set()
+            for other in bpy.data.objects:
+                if str(other.get("starbreaker_mesh_asset", "") or "") != asset:
+                    continue
+                for material in getattr(getattr(other, "data", None), "materials", None) or ():
+                    key = _compact_slot_key(material.name, prefix) if material is not None else None
+                    if key is not None:
+                        slots.add(key)
+            ordered = sorted(sidecar.submaterials, key=lambda item: item.index)
+            mapping = {}
+            cursor = 0
+            for name, slot_id in sorted(slots, key=lambda item: item[1]):
+                for position in range(cursor, len(ordered)):
+                    if ordered[position].submaterial_name.strip() == name:
+                        mapping[(name, slot_id)] = ordered[position]
+                        cursor = position + 1
+                        break
+            cache[cache_key] = mapping
+        return mapping.get(parsed)
+
     def _submaterials_by_name_all(
         self,
         sidecar_path: str,
@@ -440,6 +493,16 @@ class OrchestrationMixin:
         """
         if record.palette_id:
             return record.palette_id
+        # A part on the ship's own exterior material file follows the ship's
+        # paint: that file's DefaultPalette names one variant only (the Zeus
+        # file says rsi_zeus_es, so the CL's cargo pods, ramp and turret came
+        # out in the ES grey).
+        if (
+            record.material_sidecar
+            and self.exterior_material_sidecars is not None
+            and record.material_sidecar in self.exterior_material_sidecars
+        ):
+            return None
         if record.material_sidecar:
             return self._sidecar_default_palette_id(record.material_sidecar)
         return None
@@ -572,6 +635,8 @@ class OrchestrationMixin:
                         continue
                     matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
                     if matched_submaterial is None:
+                        matched_submaterial = self._compact_slot_submaterial(obj, sidecar_path, sidecar, slot_material.name)
+                    if matched_submaterial is None:
                         candidates = target_submaterials_by_name_all.get(canonical_slot_name)
                         if candidates:
                             matched_submaterial = min(
@@ -601,6 +666,8 @@ class OrchestrationMixin:
                     inferred_slot_mapping.append(None)
                     continue
                 matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                if matched_submaterial is None:
+                    matched_submaterial = self._compact_slot_submaterial(obj, sidecar_path, sidecar, slot_material.name)
                 if matched_submaterial is None:
                     candidates = target_submaterials_by_name_all.get(canonical_slot_name)
                     if candidates:
@@ -1373,3 +1440,16 @@ class PackageImporter(
     OrchestrationMixin,
 ):
     """Final composed importer. All behaviour lives in themed mixins."""
+
+
+def _compact_slot_key(slot_name: str, prefix: str) -> tuple[str, int] | None:
+    """(submaterial name, material id) of `<file>_mtl_<name>_0<id>`, or None."""
+    name = slot_name
+    if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
+        name = name[:-4]
+    if not name.lower().startswith(prefix):
+        return None
+    stem, separator, suffix = name[len(prefix):].rpartition("_")
+    if not separator or not suffix.isdigit():
+        return None
+    return stem, int(suffix)
