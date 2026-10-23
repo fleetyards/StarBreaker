@@ -531,6 +531,62 @@ fn extract_subgeometry_palette(
     })
 }
 
+/// An item's worn model: the SubGeometry carrying `tag` among its Tags.
+pub(crate) struct WornGeometry {
+    pub geometry: String,
+    /// Empty when neither it nor a sibling names one.
+    pub material: String,
+    pub palette: Option<mtl::TintPalette>,
+}
+
+/// Find the SubGeometry tagged `tag` (`Male`) under the entity's
+/// `SGeometryResourceParams`. Armour records default to the model shown when
+/// dropped -- the RRS Morozov-SH core is a loot crate -- and keep the worn
+/// mesh, its material and its tint palette on the tagged SubGeometry. The
+/// male entry of the Morozov-SH core names no material; the female one's
+/// (the same file) is taken then. Its palette (rrs_specialist_heavy_06_01_01)
+/// is what makes the core black: without it the layers drew white.
+pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Option<WornGeometry> {
+    let compiled = db.compile_path::<Value>(record.struct_id(), "Components[SGeometryResourceParams]").ok()?;
+    let components = db.query::<Value>(&compiled, record).unwrap_or_default();
+    let sub_material = |sub: &Value| -> Option<String> {
+        get_value_field(sub, "Geometry")
+            .and_then(|g| get_value_field(g, "Material"))
+            .and_then(|m| get_value_string(m, "path"))
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+    };
+    for component in &components {
+        let Some(root) = get_value_field(component, "Geometry") else { continue };
+        let Some(subs) = get_value_array(root, "SubGeometry") else { continue };
+        let tagged = subs.iter().find(|sub| {
+            get_value_string(sub, "Tags")
+                .unwrap_or("")
+                .split_whitespace()
+                .any(|t| t.eq_ignore_ascii_case(tag))
+        });
+        let Some(sub) = tagged else { continue };
+        let geometry = get_value_field(sub, "Geometry")
+            .and_then(|g| get_value_field(g, "Geometry"))
+            .and_then(|g| get_value_string(g, "path"))
+            .filter(|p| !p.is_empty())?
+            .to_string();
+        let material = sub_material(sub)
+            .or_else(|| {
+                get_value_field(root, "Geometry")
+                    .and_then(|g| get_value_field(g, "Material"))
+                    .and_then(|m| get_value_string(m, "path"))
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| subs.iter().find_map(|other| sub_material(other)))
+            .unwrap_or_default();
+        let palette = get_value_field(sub, "Geometry").and_then(|g| extract_subgeometry_palette(g, None));
+        return Some(WornGeometry { geometry, material, palette });
+    }
+    None
+}
+
 fn read_palette_rgb_entry(
     entry: Option<&starbreaker_datacore::query::value::Value>,
 ) -> [f32; 3] {
@@ -584,18 +640,33 @@ pub(crate) fn query_tint_palette(db: &Database, record: &Record) -> Option<mtl::
     let tpt_si = db.struct_id("TintPaletteTree")?;
     // Find an exact match first (e.g., "rsi_zeus_cl"), not a substring match
     // that could pick up a paint variant like "aegs_gladius_black_grey_grey_geometric".
-    let palette_record = db.records_of_type(tpt_si)
-        .find(|r| {
+    let find_palette = |wanted: &str| {
+        db.records_of_type(tpt_si).find(|r| {
             let name = db.resolve_string2(r.name_offset).to_lowercase();
             let rec_short = name.rsplit('.').next().unwrap_or(&name);
-            rec_short == short_name
-        })?;
+            rec_short == wanted
+        })
+    };
+    if let Some(palette_record) = find_palette(&short_name) {
+        return query_tint_from_record(db, palette_record, Some(short_name));
+    }
 
-    query_tint_from_record(
-        db,
-        palette_record,
-        Some(short_name),
-    )
+    // Strategy 3: a ship's own component wears the ship's paint and names no
+    // palette of its own. The Hammerhead's manned turret
+    // (aegs_hammerhead_scitem_turret_side_frontleft) rendered white; its
+    // paint is aegs_hammerhead_default. Try the shorter prefixes of the name,
+    // as is and with _default, down to two parts.
+    let parts: Vec<&str> = short_name.split('_').collect();
+    for len in (2..parts.len()).rev() {
+        let prefix = parts[..len].join("_");
+        for wanted in [prefix.clone(), format!("{prefix}_default")] {
+            if let Some(palette_record) = find_palette(&wanted) {
+                log::info!("  palette by name prefix: {wanted}");
+                return query_tint_from_record(db, palette_record, Some(wanted));
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn query_related_tint_palettes(

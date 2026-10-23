@@ -144,6 +144,11 @@ pub struct ExportOptions {
     /// Put interior objects of a decomposed scene.blend into their own
     /// `<package> Interior` collection instead of the package collection.
     pub separate_interior_collection: bool,
+    /// Export the entity's worn model: the `SGeometryResourceParams`
+    /// SubGeometry with this tag (`Male`), with its own material and tint
+    /// palette, instead of the default geometry. Armour cores, arms and legs
+    /// default to the loot crate or carry prop they show when dropped.
+    pub worn_subgeometry_tag: Option<String>,
 }
 
 impl Default for ExportOptions {
@@ -167,6 +172,7 @@ impl Default for ExportOptions {
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
             separate_interior_collection: false,
+            worn_subgeometry_tag: None,
         }
     }
 }

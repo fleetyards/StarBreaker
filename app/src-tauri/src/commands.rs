@@ -1548,6 +1548,7 @@ pub async fn start_export(
         default_animation_tags: vec!["landing_gear_extend".to_string()],
         decomposed_package_subdir: None,
         separate_interior_collection: request.separate_interior_collection,
+        worn_subgeometry_tag: None,
     };
 
     log::info!(

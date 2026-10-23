@@ -172,6 +172,7 @@ fn test_phase_6b_export_aurora_mk2_full_integration() {
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
             separate_interior_collection: false,
+            worn_subgeometry_tag: None,
         };
 
         // Run the full export pipeline
@@ -254,6 +255,7 @@ fn test_phase_6b_aurora_mesh_file_count_and_headers() {
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
             separate_interior_collection: false,
+            worn_subgeometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -340,6 +342,7 @@ fn test_phase_6b_aurora_scene_json_valid() {
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
             separate_interior_collection: false,
+            worn_subgeometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -418,6 +421,7 @@ fn test_phase_6b_aurora_validation_framework() {
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
             separate_interior_collection: false,
+            worn_subgeometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -490,6 +494,7 @@ fn test_phase_6b_aurora_texture_export() {
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
             separate_interior_collection: false,
+            worn_subgeometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(

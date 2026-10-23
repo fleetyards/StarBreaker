@@ -85,6 +85,11 @@ pub struct ExportOpts {
     /// Put interiors into their own collection in the decomposed scene.blend
     #[arg(long)]
     pub separate_interior_collection: bool,
+    /// Export an item's worn model (the SubGeometry tagged Male, with its
+    /// material and tint palette) instead of its default geometry, which for
+    /// armour is often the loot crate it shows when dropped
+    #[arg(long)]
+    pub worn: bool,
 }
 
 impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
@@ -130,6 +135,7 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
                 starbreaker_3d::ExportKind::Bundled => None,
             },
             separate_interior_collection: opts.separate_interior_collection,
+            worn_subgeometry_tag: opts.worn.then(|| "Male".to_string()),
         }
     }
 }
