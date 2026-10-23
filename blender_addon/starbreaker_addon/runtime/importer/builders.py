@@ -123,10 +123,29 @@ def _layered_wear_first_non_neutral_tint(
     submaterial: SubmaterialRecord,
 ) -> tuple[float, float, float] | None:
     for layer in submaterial.layer_manifest:
+        if (getattr(layer, "name", None) or "").lower().startswith("wearlayer"):
+            continue
         tint = layer.tint_color
         if tint is not None and any(abs(channel - 1.0) > 1e-6 for channel in tint):
             return tint
     return None
+
+
+def _layer_metal_tint(layer: LayerManifestEntry) -> tuple[float, float, float] | None:
+    """A layer's colour: its tint, times its specular colour when it is a
+    metal. A metal's colour is its F0, and the layer file keeps that in
+    Specular with a black Diffuse: the Gallant battery's weapon_copper_03
+    (0.30, 0.18, 0.09) and coil bronze_01 rendered as white metal on the tint
+    alone. A (1,1,1) specular is the spec-map placeholder and is left out."""
+    tint = layer.tint_color
+    if tint is None:
+        return None
+    if _layer_snapshot_float(layer, "metallic") < 0.5:
+        return tint
+    specular = _triplet_from_any(layer.layer_snapshot.get("specular"))
+    if specular is None or all(abs(channel - 1.0) < 1e-6 for channel in specular):
+        return tint
+    return tuple(t * s for t, s in zip(tint, specular))  # type: ignore[return-value]
 
 
 def _clamp_unit_float(value: float) -> float:
@@ -2163,9 +2182,22 @@ class BuildersMixin:
             channels[0] if channels else None
         )
         base_palette_linked = False
+        palette_metal = False
         if active_channel is not None and palette is not None:
-            base_palette_socket = self._palette_color_socket(
-                nodes, palette, active_channel.name, x=-280, y=40
+            # A palette channel with a near-black colour and a strong
+            # specular is a metal (the Gallant's tertiary: 0.004 diffuse,
+            # gold 0.30/0.22/0.09 finish, its battery cell); its colour is
+            # the finish specular, as on Illum.
+            finish_specular = palette_finish_specular(palette, active_channel.name)
+            palette_metal = (
+                finish_specular is not None
+                and sum(finish_specular) / 3.0 >= 0.15
+                and sum(palette_color(palette, active_channel.name)) / 3.0 <= 0.05
+            )
+            base_palette_socket = (
+                self._palette_specular_socket(nodes, palette, active_channel.name, x=-280, y=40)
+                if palette_metal
+                else self._palette_color_socket(nodes, palette, active_channel.name, x=-280, y=40)
             )
             if base_palette_socket is not None:
                 target = _input_socket(layered_group, "Base Palette")
@@ -2207,13 +2239,13 @@ class BuildersMixin:
                     fallback_target = _input_socket(layered_group, "Base Image")
                     if fallback_target is not None:
                         links.new(fallback_image_node.outputs[0], fallback_target)
+        # A white base tint is the base colour, not a missing one: the
+        # Gallant's bare-metal receiver (H_bare_01_A, base tint 1,1,1) took
+        # its wear layer's black and rendered as black metal. Only a base
+        # layer without any tint borrows the first tinted base layer's.
         fallback_tint = (
-            base_layer.tint_color
-            if (
-                base_layer is not None
-                and base_layer.tint_color is not None
-                and any(abs(c - 1.0) > 1e-6 for c in base_layer.tint_color)
-            )
+            _layer_metal_tint(base_layer)
+            if base_layer is not None and base_layer.tint_color is not None
             else _layered_wear_first_non_neutral_tint(submaterial)
         )
         if not base_palette_linked and fallback_tint is not None:
@@ -2280,7 +2312,12 @@ class BuildersMixin:
                 links.new(wear_factor_socket, metallic_mix.inputs[0])
                 links.new(metallic_mix.outputs[0], metallic_target)
             else:
-                metallic_target.default_value = wear_metallic
+                # Without a wear factor the base layer is all that shows.
+                metallic_target.default_value = base_metallic if wear_factor_socket is None else wear_metallic
+        if palette_metal and metallic_target is not None:
+            for link in list(metallic_target.links):
+                links.remove(link)
+            metallic_target.default_value = 1.0
 
         # Roughness (base + wear layer).
         base_roughness_source = self._roughness_group_source_socket(
@@ -2441,8 +2478,9 @@ class BuildersMixin:
             image = self._layer_blend_image(nodes, links, layer.diffuse_export_path, tiling, True, x - 300, ly)
             if image is not None:
                 links.new(image.outputs["Color"], _input_socket(group, prefix + "Image"))
-            if layer.tint_color is not None:
-                self._set_socket_default(_input_socket(group, prefix + "Tint"), (*layer.tint_color, 1.0))
+            tint = _layer_metal_tint(layer)
+            if tint is not None:
+                self._set_socket_default(_input_socket(group, prefix + "Tint"), (*tint, 1.0))
             if layer.palette_channel is not None and palette is not None:
                 palette_socket = self._palette_color_socket(nodes, palette, layer.palette_channel.name, x=x - 300, y=ly - 120)
                 if palette_socket is not None:

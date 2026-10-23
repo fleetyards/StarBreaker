@@ -152,6 +152,13 @@ class LayerDetailTests(unittest.TestCase):
             (0.3, 0.4, 0.5),
         )
 
+    def test_layered_wear_first_non_neutral_tint_skips_wear_layers(self) -> None:
+        # The Gallant's bare metal: white base, black wear layer.
+        base = types.SimpleNamespace(name="BaseLayer1", tint_color=(1.0, 1.0, 1.0))
+        wear = types.SimpleNamespace(name="WearLayer1", tint_color=(0.0, 0.0, 0.0))
+        submaterial = types.SimpleNamespace(layer_manifest=[base, wear])
+        self.assertIsNone(_layered_wear_first_non_neutral_tint(submaterial))
+
     def test_layered_wear_first_non_neutral_tint_returns_none_when_neutral(self) -> None:
         layer_a = types.SimpleNamespace(tint_color=(1.0, 1.0, 1.0))
         layer_b = types.SimpleNamespace(tint_color=None)
