@@ -97,6 +97,15 @@ def _stencil_override_selection(
     return selected_tint, selected_specular, color_enable, tone_mode
 
 
+
+def _metal_tint(tint, metallic):
+    """A metal layer's TintColor also tints its reflectance (the colour
+    LayerSurface gives a metal), except an all-black one: that is the unset
+    value, the Hornet thrusters' raw_metal authors 0,0,0 and shows bright."""
+    if tint is not None and metallic >= 0.5 and max(tint) < 1e-6:
+        return None
+    return tint
+
 class LayersMixin:
     """Layer/wear/detail/stencil/iridescence wiring for ``PackageImporter``."""
 
@@ -242,7 +251,7 @@ class LayersMixin:
                 0.0, min(1.0, _float_layer_public_param(layer, "DetailGloss"))
             ),
             detail_bump_strength=max(0.0, _float_layer_public_param(layer, "DetailBump")),
-            tint_color=layer.tint_color,
+            tint_color=_metal_tint(layer.tint_color, metallic_value),
             palette=palette,
             palette_channel_name=layer_channel_name,
             palette_finish_channel_name=layer_channel_name,

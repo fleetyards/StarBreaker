@@ -511,7 +511,7 @@ class GroupsMixin:
     def _ensure_runtime_layer_surface_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime LayerSurface",
-            "layer_surface_v9",
+            "layer_surface_v10",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -520,7 +520,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime LayerSurface",
-            signature="layer_surface_v9",
+            signature="layer_surface_v10",
             inputs=[
                 ("Base Color", "NodeSocketColor"),
                 ("Base Alpha", "NodeSocketFloat"),
@@ -550,7 +550,7 @@ class GroupsMixin:
                 ("Metallic", "NodeSocketFloat"),
             ],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v9":
+        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v10":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -642,7 +642,15 @@ class GroupsMixin:
         metallic_color_mix.blend_type = "MIX"
         links.new(_output_socket(group_input, "Metallic"), metallic_color_mix.inputs[0])
         links.new(final_color.outputs[0], metallic_color_mix.inputs[1])
-        links.new(_output_socket(group_input, "Specular Color"), metallic_color_mix.inputs[2])
+        # A metal is its F0, tinted by the layer's TintColor: the Ghost Mk II's
+        # raw aluminium cockpit (tint 0.138) rendered as bare bright metal.
+        metal_tint = nodes.new("ShaderNodeMixRGB")
+        metal_tint.location = (-320, 420)
+        metal_tint.blend_type = "MULTIPLY"
+        metal_tint.inputs[0].default_value = 1.0
+        links.new(_output_socket(group_input, "Specular Color"), metal_tint.inputs[1])
+        links.new(_output_socket(group_input, "Tint Color"), metal_tint.inputs[2])
+        links.new(metal_tint.outputs[0], metallic_color_mix.inputs[2])
 
         links.new(metallic_color_mix.outputs[0], group_output.inputs["Color"])
         links.new(_output_socket(group_input, "Base Alpha"), group_output.inputs["Alpha"])
@@ -670,7 +678,7 @@ class GroupsMixin:
         links.new(detail_spec.outputs[0], group_output.inputs["Specular"])
         links.new(bump.outputs[0], group_output.inputs["Normal"])
         links.new(_output_socket(group_input, "Metallic"), group_output.inputs["Metallic"])
-        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v9"
+        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v10"
         return group_tree
 
     def _ensure_runtime_hard_surface_group(self) -> bpy.types.ShaderNodeTree:
