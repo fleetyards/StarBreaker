@@ -2309,6 +2309,18 @@ class BuildersMixin:
             if target is not None:
                 links.new(roughness_output, target)
 
+        # LayerBlend_V2 with a blend map: all base layers, stacked by it.
+        # The two-layer wear composition above stays for the rest; what it
+        # fed is swept once these links replace it.
+        blend_outputs = self._layer_blend_sockets(nodes, links, submaterial, palette, x=-280, y=1400)
+        if blend_outputs is not None:
+            color_output, roughness_output, metallic_output = blend_outputs
+            for name, socket in (("Base Color", color_output), ("Roughness", roughness_output),
+                                 ("Metallic", metallic_output)):
+                target = _input_socket(principled_group, name)
+                if target is not None:
+                    links.new(socket, target)
+
         # Normal map.
         normal_path = textures["normal"]
         if normal_path:
@@ -2371,6 +2383,110 @@ class BuildersMixin:
         self._configure_material(
             material, blend_method=plan.blend_method, shadow_method=plan.shadow_method
         )
+
+    def _layer_blend_sockets(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        submaterial: SubmaterialRecord,
+        palette: PaletteRecord | None,
+        *,
+        x: int,
+        y: int,
+    ) -> tuple[Any, Any, Any] | None:
+        """Colour, roughness and metallic of a LayerBlend_V2 material whose
+        base layers are chosen by a blend map (TexSlot12), or None.
+
+        The layered-wear path reads only the first layer plus one more: the
+        ADP-mk4 helmet's olive paint is its third base layer and never showed,
+        and with the wear layers (metallic, black tint) over everything it
+        rendered glossy black. Wear is left out here: a catalogue item is
+        pristine, and the ORC-mkX core's white wear metal covered 40% of it.
+        With a single base layer the material has nothing to blend.
+        """
+        # Slots by the number in the name: manifests skip some (the Zeus
+        # helmet shell has BaseLayer2-4, its visor 3 and 4 only).
+        numbered: dict[int, LayerManifestEntry] = {}
+        for layer in submaterial.layer_manifest:
+            name = (layer.name or "").lower()
+            if name.startswith("baselayer") and name[9:].isdigit() and 1 <= int(name[9:]) <= 4:
+                numbered.setdefault(int(name[9:]), layer)
+        if len(numbered) < 2:
+            return None
+        blend_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot12",), roles=("blend_mask",))
+        blend_node = self._image_node(
+            nodes, blend_ref.export_path if blend_ref is not None else None, x=x - 300, y=y + 300, is_color=False
+        )
+        if blend_node is None:
+            return None
+        group = nodes.new("ShaderNodeGroup")
+        group.node_tree = self._ensure_runtime_layer_blend_group()
+        _refresh_group_node_sockets(group)
+        group.location = (x + 200, y)
+        group.label = "StarBreaker LayerBlend"
+        links.new(blend_node.outputs[0], _input_socket(group, "Blend Color"))
+        blend_tiling = _float_public_param(submaterial, "BlendMapTiling") or 1.0
+        self._apply_uv_tiling(nodes, links, blend_node, blend_tiling, x=x - 600, y=y + 300)
+
+        # An empty slot takes the layer underneath it (slot 4, at the bottom,
+        # the highest one there is), so its channel changes nothing.
+        slots: dict[int, LayerManifestEntry] = {}
+        below = numbered[max(numbered)]
+        for index in (4, 3, 2, 1):
+            below = slots[index] = numbered.get(index, below)
+        for index, layer in sorted(slots.items()):
+            prefix = "Layer%d " % index
+            ly = y - index * 400
+            tiling = float(layer.uv_tiling or 1.0)
+            image = self._layer_blend_image(nodes, links, layer.diffuse_export_path, tiling, True, x - 300, ly)
+            if image is not None:
+                links.new(image.outputs["Color"], _input_socket(group, prefix + "Image"))
+            if layer.tint_color is not None:
+                self._set_socket_default(_input_socket(group, prefix + "Tint"), (*layer.tint_color, 1.0))
+            if layer.palette_channel is not None and palette is not None:
+                palette_socket = self._palette_color_socket(nodes, palette, layer.palette_channel.name, x=x - 300, y=ly - 120)
+                if palette_socket is not None:
+                    self._link_color_output(palette_socket, _input_socket(group, prefix + "Palette"))
+            smooth_ref = _layer_texture_reference(layer, alpha_semantic="smoothness")
+            smooth_path = smooth_ref.export_path if smooth_ref is not None else layer.normal_export_path
+            smooth = self._layer_blend_image(nodes, links, smooth_path, tiling, False, x - 300, ly - 240)
+            if smooth is not None:
+                links.new(smooth.outputs["Alpha"], _input_socket(group, prefix + "Smoothness"))
+            self._set_socket_default(_input_socket(group, prefix + "Gloss"), float(layer.gloss_mult if layer.gloss_mult is not None else 1.0))
+            self._set_socket_default(_input_socket(group, prefix + "Metallic"), _layer_snapshot_float(layer, "metallic"))
+        return (
+            _output_socket(group, "Color"),
+            _output_socket(group, "Roughness"),
+            _output_socket(group, "Metallic"),
+        )
+
+    def _layer_blend_image(
+        self,
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        path: str | None,
+        tiling: float,
+        is_color: bool,
+        x: int,
+        y: int,
+    ) -> bpy.types.ShaderNodeTexImage | None:
+        """A layer texture at the layer's own tiling. `_image_node` hands back
+        a node already in the tree for the same file; two layers sharing a
+        texture at different tilings (the ORC-mkX gauntlets' paint at 20 and
+        25) then need their own node."""
+        node = self._image_node(nodes, path, x=x, y=y, is_color=is_color)
+        if node is None:
+            return None
+        vector = node.inputs.get("Vector")
+        if vector is not None and vector.is_linked:
+            copy = nodes.new("ShaderNodeTexImage")
+            copy.image = node.image
+            copy.interpolation = node.interpolation
+            copy.extension = node.extension
+            copy.location = (x, y)
+            node = copy
+        self._apply_uv_tiling(nodes, links, node, tiling, x=x - 300, y=y)
+        return node
 
     def _build_principled_material(
         self,

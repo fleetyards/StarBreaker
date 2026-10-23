@@ -1672,6 +1672,138 @@ class GroupsMixin:
         group_tree["starbreaker_runtime_built_signature"] = "layered_inputs_v1"
         return group_tree
 
+    def _ensure_runtime_layer_blend_group(self) -> bpy.types.ShaderNodeTree:
+        """LayerBlend_V2's four base layers, stacked by the blend map.
+
+        Inputs per layer N (1-4): Image, Tint, Palette (colours, default
+        white), Smoothness (the layer DDNA alpha), Gloss (its GlossMult) and
+        Metallic; plus Blend Color, the material's TexSlot12.
+
+        Outputs: Color, Roughness, Metallic.
+
+        Layer 4 lies underneath; the blend map's blue mixes in layer 3, green
+        layer 2, red layer 1 (scdatatools' ``.mix channels``). Character armour
+        paints its colours this way: the ADP-mk4 Woodland's olive brow plate
+        is layer 3 under blue, the ORC-mkX core's olive plates layer 2 under
+        green. Each layer is image x tint x palette; roughness is the shared
+        DDNA mapping, sqrt(1 - smoothness * gloss).
+        """
+        signature = "layer_blend_v1"
+        self._invalidate_runtime_group_if_unexpected(
+            "StarBreaker Runtime LayerBlend",
+            signature,
+            {
+                "NodeGroupInput": 1,
+                "NodeGroupOutput": 1,
+                "ShaderNodeSeparateColor": 1,
+                "ShaderNodeMixRGB": 11,
+                "ShaderNodeMath": 12,
+                "ShaderNodeMix": 6,
+            },
+        )
+        inputs = [("Blend Color", "NodeSocketColor")]
+        for index in range(1, 5):
+            inputs += [
+                ("Layer%d Image" % index, "NodeSocketColor"),
+                ("Layer%d Tint" % index, "NodeSocketColor"),
+                ("Layer%d Palette" % index, "NodeSocketColor"),
+                ("Layer%d Smoothness" % index, "NodeSocketFloat"),
+                ("Layer%d Gloss" % index, "NodeSocketFloat"),
+                ("Layer%d Metallic" % index, "NodeSocketFloat"),
+            ]
+        group_tree, group_input, group_output = self._begin_runtime_shared_group(
+            "StarBreaker Runtime LayerBlend",
+            signature=signature,
+            inputs=inputs,
+            outputs=[
+                ("Color", "NodeSocketColor"),
+                ("Roughness", "NodeSocketFloat"),
+                ("Metallic", "NodeSocketFloat"),
+            ],
+        )
+        if group_tree.get("starbreaker_runtime_built_signature") == signature:
+            return group_tree
+        nodes = group_tree.nodes
+        links = group_tree.links
+        _set_group_input_default(group_input, "Blend Color", (0.0, 0.0, 0.0, 1.0))
+
+        layers = []
+        for index in range(1, 5):
+            prefix = "Layer%d " % index
+            for name in ("Image", "Tint", "Palette"):
+                _set_group_input_default(group_input, prefix + name, (1.0, 1.0, 1.0, 1.0))
+            _set_group_input_default(group_input, prefix + "Smoothness", 0.5)
+            _set_group_input_default(group_input, prefix + "Gloss", 1.0)
+            _set_group_input_default(group_input, prefix + "Metallic", 0.0)
+            y = 600 - (index - 1) * 400
+
+            tinted = nodes.new("ShaderNodeMixRGB")
+            tinted.location = (-700, y)
+            tinted.blend_type = "MULTIPLY"
+            tinted.inputs[0].default_value = 1.0
+            links.new(_output_socket(group_input, prefix + "Image"), tinted.inputs[1])
+            links.new(_output_socket(group_input, prefix + "Tint"), tinted.inputs[2])
+            paletted = nodes.new("ShaderNodeMixRGB")
+            paletted.location = (-520, y)
+            paletted.blend_type = "MULTIPLY"
+            paletted.inputs[0].default_value = 1.0
+            links.new(tinted.outputs[0], paletted.inputs[1])
+            links.new(_output_socket(group_input, prefix + "Palette"), paletted.inputs[2])
+
+            smooth = nodes.new("ShaderNodeMath")
+            smooth.location = (-700, y - 180)
+            smooth.operation = "MULTIPLY"
+            smooth.use_clamp = True
+            links.new(_output_socket(group_input, prefix + "Smoothness"), smooth.inputs[0])
+            links.new(_output_socket(group_input, prefix + "Gloss"), smooth.inputs[1])
+            invert = nodes.new("ShaderNodeMath")
+            invert.location = (-520, y - 180)
+            invert.operation = "SUBTRACT"
+            invert.use_clamp = True
+            invert.inputs[0].default_value = 1.0
+            links.new(smooth.outputs[0], invert.inputs[1])
+            rough = nodes.new("ShaderNodeMath")
+            rough.location = (-340, y - 180)
+            rough.operation = "SQRT"
+            rough.use_clamp = True
+            links.new(invert.outputs[0], rough.inputs[0])
+            layers.append((paletted.outputs[0], rough.outputs[0], _output_socket(group_input, prefix + "Metallic")))
+
+        separate = nodes.new("ShaderNodeSeparateColor")
+        separate.location = (-340, 900)
+        links.new(_output_socket(group_input, "Blend Color"), separate.inputs[0])
+
+        color, roughness, metallic = layers[3]
+        for step, (layer_index, channel) in enumerate(((2, 2), (1, 1), (0, 0))):
+            x = -100 + step * 220
+            factor = separate.outputs[channel]
+            layer_color, layer_rough, layer_metal = layers[layer_index]
+            color_mix = nodes.new("ShaderNodeMixRGB")
+            color_mix.location = (x, 300)
+            color_mix.blend_type = "MIX"
+            links.new(factor, color_mix.inputs[0])
+            links.new(color, color_mix.inputs[1])
+            links.new(layer_color, color_mix.inputs[2])
+            color = color_mix.outputs[0]
+            for target, (below, above) in (("rough", (roughness, layer_rough)), ("metal", (metallic, layer_metal))):
+                value_mix = nodes.new("ShaderNodeMix")
+                value_mix.location = (x, 0 if target == "rough" else -300)
+                if hasattr(value_mix, "data_type"):
+                    value_mix.data_type = "FLOAT"
+                links.new(factor, value_mix.inputs[0])
+                links.new(below, value_mix.inputs[2])
+                links.new(above, value_mix.inputs[3])
+                if target == "rough":
+                    roughness = value_mix.outputs[0]
+                else:
+                    metallic = value_mix.outputs[0]
+
+        links.new(color, group_output.inputs["Color"])
+        links.new(roughness, group_output.inputs["Roughness"])
+        links.new(metallic, group_output.inputs["Metallic"])
+        group_tree["starbreaker_runtime_built_signature"] = signature
+        return group_tree
+
     def _ensure_runtime_principled_group(self) -> bpy.types.ShaderNodeTree:
         """Wrap Principled BSDF + NormalMap + Bump into a shader group.
 
