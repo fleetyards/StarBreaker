@@ -2498,6 +2498,13 @@ class BuildersMixin:
             smooth = self._layer_blend_image(nodes, links, smooth_path, tiling, False, x - 300, ly - 240)
             if smooth is not None:
                 links.new(smooth.outputs["Alpha"], _input_socket(group, prefix + "Smoothness"))
+            else:
+                # No gloss map: the layer file's own Shininess (0-255). The
+                # Zeus visor's gold_polished has none and drew matte at the
+                # 0.5 default; at its 255 it is the mirror it is in game.
+                shininess = _layer_snapshot_float(layer, "shininess")
+                if shininess > 0.0:
+                    self._set_socket_default(_input_socket(group, prefix + "Smoothness"), min(1.0, shininess / 255.0))
             self._set_socket_default(_input_socket(group, prefix + "Gloss"), float(layer.gloss_mult if layer.gloss_mult is not None else 1.0))
             self._set_socket_default(_input_socket(group, prefix + "Metallic"), _layer_snapshot_float(layer, "metallic"))
         return (
