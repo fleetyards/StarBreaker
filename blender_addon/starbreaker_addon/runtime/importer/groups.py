@@ -1687,8 +1687,14 @@ class GroupsMixin:
         is layer 3 under blue, the ORC-mkX core's olive plates layer 2 under
         green. Each layer is image x tint x palette; roughness is the shared
         DDNA mapping, sqrt(1 - smoothness * gloss).
+
+        A channel takes its layer over 0.3-0.7 (smoothstep), not linearly: in
+        the game a layer shows where its channel wins and barely below. Mixed
+        in proportion, the Morozov-SH mouthpiece's partial green (median
+        0.25) laid its light-grey layer 2 over the dark fabric the shop shots
+        show; the ADP's olive, at full blue, is unchanged.
         """
-        signature = "layer_blend_v1"
+        signature = "layer_blend_v2"
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime LayerBlend",
             signature,
@@ -1699,6 +1705,7 @@ class GroupsMixin:
                 "ShaderNodeMixRGB": 11,
                 "ShaderNodeMath": 12,
                 "ShaderNodeMix": 6,
+                "ShaderNodeMapRange": 3,
             },
         )
         inputs = [("Blend Color", "NodeSocketColor")]
@@ -1776,7 +1783,13 @@ class GroupsMixin:
         color, roughness, metallic = layers[3]
         for step, (layer_index, channel) in enumerate(((2, 2), (1, 1), (0, 0))):
             x = -100 + step * 220
-            factor = separate.outputs[channel]
+            sharpen = nodes.new("ShaderNodeMapRange")
+            sharpen.location = (x, 900)
+            sharpen.interpolation_type = "SMOOTHSTEP"
+            sharpen.inputs["From Min"].default_value = 0.3
+            sharpen.inputs["From Max"].default_value = 0.7
+            links.new(separate.outputs[channel], sharpen.inputs["Value"])
+            factor = sharpen.outputs["Result"]
             layer_color, layer_rough, layer_metal = layers[layer_index]
             color_mix = nodes.new("ShaderNodeMixRGB")
             color_mix.location = (x, 300)

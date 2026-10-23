@@ -153,13 +153,16 @@ def _layer_metal_tint(layer: LayerManifestEntry) -> tuple[float, float, float] |
     specular = _triplet_from_any(layer.layer_snapshot.get("specular"))
     if specular is None or all(abs(channel - 1.0) < 1e-6 for channel in specular):
         return tint
-    # A near-black tint is unset on a metal: the Hurston Attrition's copper
-    # rails (weapon_copper_striped_01, tint 0.026/0.045/0.061) are bright
-    # copper in the game and drew black. A real tint is brighter -- the Zeus
-    # visor's 0.07/0.02/1.0 turns its gold violet, the Ghost Mk II's 0.138
-    # greys its aluminium.
+    # A near-black tint on a metal keeps only its hue: the Hurston
+    # Attrition's copper rails (weapon_copper_striped_01, tint
+    # 0.026/0.045/0.061) drew black at full strength and orange on the bare
+    # specular; the tint's blue takes them to the rose copper of the shop
+    # shots. A real tint is brighter -- the Zeus visor's 0.07/0.02/1.0 turns
+    # its gold violet, the Ghost Mk II's 0.138 greys its aluminium.
     if max(tint) < 0.1:
-        return specular
+        if max(tint) <= 1e-6:
+            return specular
+        return tuple(t / max(tint) * s for t, s in zip(tint, specular))  # type: ignore[return-value]
     return tuple(t * s for t, s in zip(tint, specular))  # type: ignore[return-value]
 
 
@@ -2398,6 +2401,17 @@ class BuildersMixin:
             normal_node = self._image_node(
                 nodes, normal_path, x=-280, y=-940, is_color=False
             )
+            # A layer's DDNA repeats at the layer's tiling, as its colour
+            # does: the Attrition's copper rails took pattern_ribbed_01 (tiling
+            # 2.4) once across the UV sheet, and their ribbing, gloss and all,
+            # stretched out of sight. The node also feeds the roughness.
+            layer_tiling = next(
+                (float(layer.uv_tiling or 1.0) for layer in submaterial.layer_manifest
+                 if layer.normal_export_path == normal_path),
+                1.0,
+            )
+            if normal_node is not None and not normal_node.inputs["Vector"].is_linked:
+                self._apply_uv_tiling(nodes, links, normal_node, layer_tiling, x=-580, y=-940)
             if normal_node is not None:
                 target = _input_socket(principled_group, "Normal Color")
                 if target is not None:
@@ -2495,9 +2509,46 @@ class BuildersMixin:
         _refresh_group_node_sockets(group)
         group.location = (x + 200, y)
         group.label = "StarBreaker LayerBlend"
-        links.new(blend_node.outputs[0], _input_socket(group, "Blend Color"))
         blend_tiling = _float_public_param(submaterial, "BlendMapTiling") or 1.0
         self._apply_uv_tiling(nodes, links, blend_node, blend_tiling, x=x - 600, y=y + 300)
+        # The game reads blend maps as sRGB: their DDS headers carry
+        # CryEngine's EIF_SRGBRead (0x800; wear maps do not). Read as data,
+        # a half-strength channel showed its layer at full half: the
+        # Morozov-SH mouthpiece came out light grey where the shop shots
+        # have it near its dark bottom layer. The image stays Non-Color --
+        # other paths load the same file as data -- and is decoded here.
+        decode = nodes.new("ShaderNodeGamma")
+        decode.location = (x - 100, y + 250)
+        decode.inputs["Gamma"].default_value = 2.2
+        links.new(blend_node.outputs[0], decode.inputs["Color"])
+        blend_color = decode.outputs[0]
+        # Red, the top layer, is partly edge wear: the Morozov-SH helmet's
+        # plate edges and seams pick its white layer 1 where its wear mask
+        # (TexSlot11) is dark, and the shop shots have none of it. Weighting
+        # red by the mask keeps the pristine item; on the ADP-mk4, whose
+        # red is paint under a light mask, 87% of it stays.
+        wear_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot11",), roles=("wear_mask",))
+        wear_node = self._image_node(
+            nodes, wear_ref.export_path if wear_ref is not None else None, x=x - 300, y=y + 600, is_color=False
+        )
+        if wear_node is not None:
+            if not wear_node.inputs["Vector"].is_linked:
+                self._apply_uv_tiling(nodes, links, wear_node, blend_tiling, x=x - 600, y=y + 600)
+            split = nodes.new("ShaderNodeSeparateColor")
+            split.location = (x - 100, y + 400)
+            links.new(blend_color, split.inputs[0])
+            red = nodes.new("ShaderNodeMath")
+            red.operation = "MULTIPLY"
+            red.location = (x + 50, y + 500)
+            links.new(split.outputs[0], red.inputs[0])
+            links.new(wear_node.outputs["Color"], red.inputs[1])
+            join = nodes.new("ShaderNodeCombineColor")
+            join.location = (x + 50, y + 350)
+            links.new(red.outputs[0], join.inputs[0])
+            links.new(split.outputs[1], join.inputs[1])
+            links.new(split.outputs[2], join.inputs[2])
+            blend_color = join.outputs[0]
+        links.new(blend_color, _input_socket(group, "Blend Color"))
 
         # An empty slot takes the layer underneath it (slot 4, at the bottom,
         # the highest one there is), so its channel changes nothing.
