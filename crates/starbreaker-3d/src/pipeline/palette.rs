@@ -658,6 +658,13 @@ pub(crate) fn query_tint_palette(db: &Database, record: &Record) -> Option<mtl::
     if let Some(palette) = query_tint_from_path(db, record, base, Some(short_name.clone())) {
         return Some(palette);
     }
+    // Some items name it on the component's Material node instead: the
+    // Demon Fang knife (apar_melee_01, apar_default) has an empty geometry
+    // palette, and its primary-tinted handle drew white without one.
+    let material = "Components[SGeometryResourceParams].Material.Palette.RootRecord.root";
+    if let Some(palette) = query_tint_from_path(db, record, material, Some(short_name.clone())) {
+        return Some(palette);
+    }
 
     // Strategy 2: Find TintPaletteTree record by entity name convention.
     let tpt_si = db.struct_id("TintPaletteTree")?;

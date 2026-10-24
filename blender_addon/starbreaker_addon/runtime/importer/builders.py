@@ -1999,7 +1999,11 @@ class BuildersMixin:
                             (_float_authored_attribute(submaterial, "Glow") or 0.0) <= 0.0
                             and "glow" not in submaterial.submaterial_name.lower()
                         )
-                        diffuse = _authored_attribute_triplet(submaterial, "Diffuse") if unlit else None
+                        # A glow with no colour map has only its Diffuse for a
+                        # colour: dark, the Demon Fang's red blade edges
+                        # (I_energy_blade, Glow 0.3) drew black.
+                        textureless = primary_color_node is None
+                        diffuse = _authored_attribute_triplet(submaterial, "Diffuse") if unlit or textureless else None
                         palette_socket.default_value = (*diffuse, 1.0) if diffuse is not None else ((1.0, 1.0, 1.0, 1.0) if unlit else (0.0, 0.0, 0.0, 1.0))
                     break
 
