@@ -1549,6 +1549,7 @@ pub async fn start_export(
         decomposed_package_subdir: None,
         separate_interior_collection: request.separate_interior_collection,
         worn_subgeometry_tag: None,
+        variant_subgeometry: false,
     };
 
     log::info!(

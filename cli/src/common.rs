@@ -90,6 +90,10 @@ pub struct ExportOpts {
     /// armour is often the loot crate it shows when dropped
     #[arg(long)]
     pub worn: bool,
+    /// Export a paint variant's own SubGeometry, the one tagged with the
+    /// record name's suffix (crlf_medgun_01_red01 -> red01)
+    #[arg(long)]
+    pub variant_tags: bool,
 }
 
 impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
@@ -136,6 +140,7 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             },
             separate_interior_collection: opts.separate_interior_collection,
             worn_subgeometry_tag: opts.worn.then(|| "Male".to_string()),
+            variant_subgeometry: opts.variant_tags,
         }
     }
 }

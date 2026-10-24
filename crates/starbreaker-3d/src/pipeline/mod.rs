@@ -149,6 +149,9 @@ pub struct ExportOptions {
     /// palette, instead of the default geometry. Armour cores, arms and legs
     /// default to the loot crate or carry prop they show when dropped.
     pub worn_subgeometry_tag: Option<String>,
+    /// Take the paint variant's SubGeometry, the one tagged with the record
+    /// name's suffix (item exports; ships never set it).
+    pub variant_subgeometry: bool,
 }
 
 impl Default for ExportOptions {
@@ -173,6 +176,7 @@ impl Default for ExportOptions {
             decomposed_package_subdir: None,
             separate_interior_collection: false,
             worn_subgeometry_tag: None,
+            variant_subgeometry: false,
         }
     }
 }

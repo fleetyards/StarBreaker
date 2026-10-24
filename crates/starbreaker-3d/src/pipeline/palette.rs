@@ -546,6 +546,32 @@ pub(crate) struct WornGeometry {
 /// male entry of the Morozov-SH core names no material; the female one's
 /// (the same file) is taken then. Its palette (rrs_specialist_heavy_06_01_01)
 /// is what makes the core black: without it the layers drew white.
+/// A paint variant's SubGeometry: the one whose tag the record name ends
+/// with (`crlf_medgun_01_red01` -> `red01`, `grin_multitool_01_grey_yellow01`
+/// -> `Grey_yellow01`). Variant records repeat the base's SubGeometry list and
+/// the game picks the entry by that tag; the default geometry is the base
+/// paint, so every medgun and multitool variant came out as the base one.
+pub(crate) fn variant_subgeometry(db: &Database, record: &Record) -> Option<WornGeometry> {
+    let name = db.resolve_string2(record.name_offset);
+    let short = name.rsplit('.').next().unwrap_or(name).to_lowercase();
+    let compiled = db.compile_path::<Value>(record.struct_id(), "Components[SGeometryResourceParams]").ok()?;
+    let components = db.query::<Value>(&compiled, record).unwrap_or_default();
+    let mut best: Option<String> = None;
+    for component in &components {
+        let Some(root) = get_value_field(component, "Geometry") else { continue };
+        let Some(subs) = get_value_array(root, "SubGeometry") else { continue };
+        for sub in subs {
+            for tag in get_value_string(sub, "Tags").unwrap_or("").split_whitespace() {
+                let lower = tag.to_lowercase();
+                if short.ends_with(&format!("_{lower}")) && best.as_ref().is_none_or(|b| b.len() < tag.len()) {
+                    best = Some(tag.to_string());
+                }
+            }
+        }
+    }
+    worn_subgeometry(db, record, &best?)
+}
+
 pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Option<WornGeometry> {
     let compiled = db.compile_path::<Value>(record.struct_id(), "Components[SGeometryResourceParams]").ok()?;
     let components = db.query::<Value>(&compiled, record).unwrap_or_default();

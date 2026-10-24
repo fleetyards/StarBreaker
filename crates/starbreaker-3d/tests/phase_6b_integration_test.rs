@@ -173,6 +173,7 @@ fn test_phase_6b_export_aurora_mk2_full_integration() {
             decomposed_package_subdir: None,
             separate_interior_collection: false,
             worn_subgeometry_tag: None,
+            variant_subgeometry: false,
         };
 
         // Run the full export pipeline
@@ -256,6 +257,7 @@ fn test_phase_6b_aurora_mesh_file_count_and_headers() {
             decomposed_package_subdir: None,
             separate_interior_collection: false,
             worn_subgeometry_tag: None,
+            variant_subgeometry: false,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -343,6 +345,7 @@ fn test_phase_6b_aurora_scene_json_valid() {
             decomposed_package_subdir: None,
             separate_interior_collection: false,
             worn_subgeometry_tag: None,
+            variant_subgeometry: false,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -422,6 +425,7 @@ fn test_phase_6b_aurora_validation_framework() {
             decomposed_package_subdir: None,
             separate_interior_collection: false,
             worn_subgeometry_tag: None,
+            variant_subgeometry: false,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -495,6 +499,7 @@ fn test_phase_6b_aurora_texture_export() {
             decomposed_package_subdir: None,
             separate_interior_collection: false,
             worn_subgeometry_tag: None,
+            variant_subgeometry: false,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(

@@ -113,7 +113,9 @@ fn export_entity_payload_cached(
     let worn = opts
         .worn_subgeometry_tag
         .as_deref()
-        .and_then(|tag| super::worn_subgeometry(db, record, tag));
+        .and_then(|tag| super::worn_subgeometry(db, record, tag))
+        .or_else(|| opts.variant_subgeometry.then(|| super::variant_subgeometry(db, record)).flatten());
+    let base_material = material_path.clone();
     let (geometry_path, material_path) = match &worn {
         Some(w) => (
             w.geometry.clone(),
@@ -121,6 +123,14 @@ fn export_entity_payload_cached(
         ),
         None => (geometry_path, material_path),
     };
+    // A variant's material also replaces the base material on the CDF's
+    // parts, which name their file themselves: the multitool's body is a
+    // part on gdgt_fps_grin_multitool_mat, and every paint variant drew it
+    // in the base olive.
+    // An empty string stands for the CDF primary part's own file: the
+    // multitool's record names no material, only its parts do.
+    let replaced_material = (worn.is_some() && !material_path.is_empty() && base_material != material_path)
+        .then(|| base_material.clone());
     // The CDF parts named here wear the entity's material instead of their
     // own: the ATLS IKTI Nine Tails sets argo_atls_powersuit_9tails.mtl for
     // its trunk, arms and legs, whose CDF attachments name the plain suit.
@@ -143,7 +153,7 @@ fn export_entity_payload_cached(
         primary_path,
         skeleton_source_path,
     ) =
-        load_geometry_parts(p4k, &geometry_path, &material_path, &material_attachments, opts, png_cache, false)?;
+        load_geometry_parts(p4k, &geometry_path, &material_path, &material_attachments, replaced_material.as_deref(), opts, png_cache, false)?;
 
     if !opts.material_mode.include_materials() {
         return Ok((
@@ -192,7 +202,7 @@ pub(crate) fn export_entity_from_paths_cached(
     use_model_bbox: bool,
 ) -> Result<EntityPayload, Error> {
     let (mesh, mtl_file, textures, nmc, skeleton_bones, primary_path, skeleton_source_path) =
-        load_geometry_parts(p4k, geometry_path, material_path, &[], opts, png_cache, use_model_bbox)?;
+        load_geometry_parts(p4k, geometry_path, material_path, &[], None, opts, png_cache, use_model_bbox)?;
 
     if !opts.material_mode.include_materials() {
         return Ok((
@@ -228,6 +238,7 @@ fn load_geometry_parts(
     geometry_path: &str,
     material_path: &str,
     material_attachments: &[String],
+    replaced_material: Option<&str>,
     opts: &ExportOptions,
     png_cache: &mut PngCache,
     use_model_bbox: bool,
@@ -260,12 +271,22 @@ fn load_geometry_parts(
         }
     }
 
+    let primary_override = resolved.parts[0].material_override.clone();
     let part_material = |part: &GeometryPart| -> String {
         let listed = !material_path.is_empty()
             && part.name.as_deref().is_some_and(|name| {
                 material_attachments.iter().any(|listed| listed.eq_ignore_ascii_case(name))
             });
-        if listed {
+        let stem = |path: &str| {
+            path.replace('\\', "/").rsplit('/').next().unwrap_or(path).trim_end_matches(".mtl").to_ascii_lowercase()
+        };
+        let base = replaced_material.map(|base| {
+            if base.is_empty() { primary_override.clone().unwrap_or_default() } else { base.to_string() }
+        });
+        let on_base = base.as_deref().is_some_and(|base| {
+            !base.is_empty() && part.material_override.as_deref().is_some_and(|own| stem(own) == stem(base))
+        });
+        if listed || on_base {
             material_path.to_string()
         } else {
             part.material_override.clone().unwrap_or_else(|| material_path.to_string())
