@@ -670,15 +670,34 @@ pub(crate) fn query_tint_palette(db: &Database, record: &Record) -> Option<mtl::
             rec_short == wanted
         })
     };
-    if let Some(palette_record) = find_palette(&short_name) {
-        return query_tint_from_record(db, palette_record, Some(short_name));
-    }
+    let palette_record = find_palette(&short_name)?;
+    query_tint_from_record(db, palette_record, Some(short_name))
+}
 
-    // Strategy 3: a ship's own component wears the ship's paint and names no
-    // palette of its own. The Hammerhead's manned turret
-    // (aegs_hammerhead_scitem_turret_side_frontleft) rendered white; its
-    // paint is aegs_hammerhead_default. Try the shorter prefixes of the name,
-    // as is and with _default, down to two parts.
+/// The exported entity's palette, or for a ship's own component exported on
+/// its own, the ship's: such a component names no palette and wears the
+/// ship's paint. The Hammerhead's manned turret
+/// (aegs_hammerhead_scitem_turret_side_frontleft) rendered white; its paint
+/// is aegs_hammerhead_default. The shorter prefixes of the name are tried, as
+/// is and with _default, down to two parts.
+///
+/// Only for the root entity. Inside a ship the parts without a palette keep
+/// none: given the ship's, the Clipper's thrusters, fins and pistons and the
+/// Cutlass's ramp drew black.
+pub(crate) fn query_tint_palette_or_prefix(db: &Database, record: &Record) -> Option<mtl::TintPalette> {
+    if let Some(palette) = query_tint_palette(db, record) {
+        return Some(palette);
+    }
+    let entity_name = db.resolve_string2(record.name_offset);
+    let short_name = entity_name.rsplit('.').next().unwrap_or(entity_name).to_lowercase();
+    let tpt_si = db.struct_id("TintPaletteTree")?;
+    let find_palette = |wanted: &str| {
+        db.records_of_type(tpt_si).find(|r| {
+            let name = db.resolve_string2(r.name_offset).to_lowercase();
+            let rec_short = name.rsplit('.').next().unwrap_or(&name);
+            rec_short == wanted
+        })
+    };
     let parts: Vec<&str> = short_name.split('_').collect();
     for len in (2..parts.len()).rev() {
         let prefix = parts[..len].join("_");

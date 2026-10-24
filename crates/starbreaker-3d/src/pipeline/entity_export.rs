@@ -18,7 +18,7 @@ use crate::nmc;
 use crate::types::MaterialTextures;
 
 use super::{
-    bone_world_transform, datacore_path_to_p4k, load_material_textures, query_tint_palette,
+    bone_world_transform, datacore_path_to_p4k, load_material_textures, query_tint_palette_or_prefix,
     resolve_material, synthesize_nmc_from_bones, ExportFormat, ExportKind, ExportOptions,
     MaterialMode, PngCache,
 };
@@ -159,7 +159,7 @@ fn export_entity_payload_cached(
         ));
     }
 
-    let palette = worn.and_then(|w| w.palette).or_else(|| query_tint_palette(db, record));
+    let palette = worn.and_then(|w| w.palette).or_else(|| query_tint_palette_or_prefix(db, record));
     Ok((
         mesh,
         mtl_file,
