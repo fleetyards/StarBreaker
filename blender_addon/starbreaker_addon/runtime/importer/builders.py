@@ -1115,6 +1115,21 @@ class BuildersMixin:
                     ):
                         resolved = _resolve_public_param_default(submaterial, "stencilopacity")
                     if (
+                        resolved is None
+                        and group_contract.name == "SB_MeshDecal_v1"
+                        and template_plan_for_submaterial(submaterial).template_key == "decal_stencil"
+                        and submaterial.decoded_feature_flags.has_stencil_map
+                        and param_key == "wearblendfalloff"
+                    ):
+                        # The group's breakup strength is WearBlendFalloff x 2;
+                        # a stencil authors it as StencilDiffuseBreakup. At the
+                        # group's default (0.5, full strength) the Hercules
+                        # emblems (breakup 0.5 over a grunge mask) came out
+                        # moth-eaten at ~60% opacity.
+                        breakup = _resolve_public_param_default(submaterial, "stencildiffusebreakup")
+                        if isinstance(breakup, (int, float)):
+                            resolved = 0.5 * float(breakup)
+                    if (
                         group_contract.name == "SB_MeshDecal_v1"
                         and param_key == "decalfalloff"
                         and isinstance(resolved, (int, float))
