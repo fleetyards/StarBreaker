@@ -55,6 +55,7 @@ from ..constants import (
 )
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets
 from ..record_utils import (
+    _authored_attribute_triplet,
     _float_authored_attribute,
     _uses_vertex_color_tint,
     _layer_texture_reference,
@@ -721,9 +722,15 @@ class MaterialsMixin:
         y: int,
     ) -> Any:
         if contract_input.name.startswith("Palette_"):
-            if palette is None:
-                return None
             channel_name = contract_input.name.removeprefix("Palette_").lower()
+            if palette is None:
+                # No palette to tint the glass: its own Diffuse does. The
+                # Calico helmet's red eye lenses (0.08, 0, 0) drew clear.
+                if channel_name == "glass":
+                    diffuse = _authored_attribute_triplet(submaterial, "Diffuse")
+                    if diffuse:
+                        return self._value_color_socket(nodes, (*diffuse[:3], 1.0), x=x, y=y)
+                return None
             used_channels = {channel.name.lower() for channel in material_palette_channels(submaterial)}
             if channel_name not in used_channels:
                 return None

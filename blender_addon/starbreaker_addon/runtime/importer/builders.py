@@ -3699,7 +3699,59 @@ class BuildersMixin:
         # (qdrv_smal_decals_a, RSI logo, warning labels, maker logos) has one
         # too and printed near-black in the host colour. A relief atlas's
         # diffuse is grey; a printed one is coloured.
-        return not BuildersMixin._decal_diffuse_is_coloured(material)
+        if BuildersMixin._decal_diffuse_is_coloured(material):
+            return False
+        # Nor is a grey diffuse: the Animus's decal sheet (apar_decals: white
+        # skull logo, lettering, stripes) is white with a flat normal map and
+        # vanished into the host. A relief atlas's normal map has relief.
+        slot2 = next((t for t in parsed.get("texture_slots", []) or [] if (t or {}).get("slot") == "TexSlot2"), None)
+        return BuildersMixin._decal_normal_has_relief(material, (slot2 or {}).get("export_path"))
+
+    _RELIEF_NORMAL_CACHE: dict[str, bool] = {}
+
+    @staticmethod
+    def _decal_normal_has_relief(material: bpy.types.Material, export_path: str | None) -> bool:
+        """True when the decal's normal map bends its normals where the decal
+        is opaque: mean |xy - 0.5| above 0.05 (the M50's Poms_EXT 0.155, the
+        Animus's printed apar_decals 0.006). Unknown counts as relief, the
+        rule's behaviour before this check."""
+        if not export_path:
+            return True
+        name = export_path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        cached = BuildersMixin._RELIEF_NORMAL_CACHE.get(name)
+        if cached is not None:
+            return cached
+        normal = next((img for img in bpy.data.images
+                       if bpy.path.basename(img.filepath).lower() == name), None)
+        node_tree = getattr(material, "node_tree", None)
+        colour = None
+        for node in (node_tree.nodes if node_tree is not None else []):
+            image = getattr(node, "image", None) if node.bl_idname == "ShaderNodeTexImage" else None
+            if image is not None and image is not normal and image.colorspace_settings.name != "Non-Color":
+                colour = image
+                break
+        result = True
+        try:
+            import numpy as np
+
+            if normal is not None and normal.size[0] and normal.size[1]:
+                def sampled(image):
+                    pixels = np.empty(image.size[0] * image.size[1] * 4, dtype=np.float32)
+                    image.pixels.foreach_get(pixels)
+                    return pixels.reshape(image.size[1], image.size[0], 4)
+                n = sampled(normal)
+                step = max(1, max(n.shape[:2]) // 512)
+                n = n[::step, ::step]
+                dev = np.abs(n[..., :2] - 0.5).max(axis=-1)
+                mask = None
+                if colour is not None and tuple(colour.size) == tuple(normal.size):
+                    mask = sampled(colour)[::step, ::step, 3] > 0.5
+                values = dev[mask] if mask is not None and mask.any() else dev.reshape(-1)
+                result = float(values.mean()) > 0.05
+        except Exception:
+            result = True
+        BuildersMixin._RELIEF_NORMAL_CACHE[name] = result
+        return result
 
     _COLOURED_DECAL_CACHE: dict[str, bool] = {}
 
