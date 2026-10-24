@@ -101,9 +101,18 @@ def _stencil_override_selection(
 def _metal_tint(tint, metallic):
     """A metal layer's TintColor also tints its reflectance (the colour
     LayerSurface gives a metal), except an all-black one: that is the unset
-    value, the Hornet thrusters' raw_metal authors 0,0,0 and shows bright."""
-    if tint is not None and metallic >= 0.5 and max(tint) < 1e-6:
+    value, the Hornet thrusters' raw_metal authors 0,0,0 and shows bright.
+
+    A near-black tint keeps only its hue, as in ``_layer_metal_tint``: the
+    Clipper's chrome pistons (metal_panel_a_base, tint 0.012) drew black at
+    full strength. The Ghost Mk II's aluminium (0.138) still darkens."""
+    if tint is None or metallic < 0.5:
+        return tint
+    peak = max(tint)
+    if peak < 1e-6:
         return None
+    if peak < 0.1:
+        return tuple(channel / peak for channel in tint)
     return tint
 
 class LayersMixin:
