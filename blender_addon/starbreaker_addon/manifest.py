@@ -268,6 +268,18 @@ class LayerManifestEntry:
         if isinstance(wear_tint_value, (list, tuple)):
             wear_tint = _float_tuple(wear_tint_value, 3)  # type: ignore[assignment]
         uv_tiling = data.get("uv_tiling")
+        # The layer file's own LayerTiling multiplies the material's
+        # UVTiling: the Demon Fang's diamond grip (UVTiling 5, LayerTiling 8)
+        # drew its knurling as 1 cm pyramids, the game's at 40 is a fine grid.
+        layer_tiling = None
+        for param in (_as_dict(data.get("resolved_material")).get("authored_public_params") or []):
+            if isinstance(param, dict) and param.get("name") == "LayerTiling":
+                try:
+                    layer_tiling = float(param.get("value"))
+                except (TypeError, ValueError):
+                    layer_tiling = None
+        if layer_tiling is not None and layer_tiling > 0.0:
+            uv_tiling = float(uv_tiling if uv_tiling is not None else 1.0) * layer_tiling
         return cls(
             index=int(data.get("index", 0)),
             name=_as_str(data.get("name")),
