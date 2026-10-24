@@ -79,6 +79,11 @@ from .utils import (
 )
 
 
+# Slot mapping value for a slot whose authored id has no submaterial in the
+# file it is drawn with: built as nodraw.
+ABSENT_SLOT = -1
+
+
 def _aligned_index(authored: MaterialSidecar, target: MaterialSidecar, index: int) -> int | None:
     """Position in `target` of the authored file's slot `index`, when the
     two files differ by inserted slots but agree around it.
@@ -99,11 +104,22 @@ def _aligned_index(authored: MaterialSidecar, target: MaterialSidecar, index: in
     common = sorted((i, in_target[name] - i) for name, i in in_authored.items() if name in in_target)
     before = [shift for i, shift in common if i < index]
     after = [shift for i, shift in common if i > index]
+    target_names = {sub.index: sub.submaterial_name.strip() for sub in target.submaterials}
+    # Past the last shared name the slot keeps the shift before it: the
+    # Mustang Delta's SubMtl43 is the Omega's trailing `stencil` (42).
+    if before and not after:
+        aligned = index + before[-1]
+        return aligned if target_names.get(aligned, "").strip("-") else None
     if not before or not after or before[-1] != after[0]:
         return None
-    target_names = {sub.index: sub.submaterial_name.strip() for sub in target.submaterials}
     aligned = index + before[-1]
-    return aligned if target_names.get(aligned, "").strip("-") else None
+    if aligned not in target_names:
+        # Pinned on both sides to an id the target file leaves out: the
+        # engine draws nothing there. The Delta's file has no 40, the Omega's
+        # Racing_decals; as a fallback to its own slot position the AMD
+        # stripes were drawn with decal_geometry, black over the nacelles.
+        return ABSENT_SLOT
+    return aligned if target_names[aligned].strip("-") else None
 
 
 class OrchestrationMixin:
@@ -321,6 +337,14 @@ class OrchestrationMixin:
             grouped.setdefault(submaterial_name, []).append(submaterial)
         self.sidecar_submaterials_by_name_all[cache_key] = grouped
         return grouped
+
+    def _absent_slot_material(self) -> bpy.types.Material:
+        material = bpy.data.materials.get("StarBreaker Absent Slot")
+        if material is None:
+            material = bpy.data.materials.new("StarBreaker Absent Slot")
+            material.use_nodes = True
+            self._build_nodraw_material(material)
+        return material
 
     def _authored_file_index(self, slot_name: str, sidecar_path: str) -> int | None:
         """Index of a slot's submaterial in the material file its mesh was authored with.
@@ -732,6 +756,14 @@ class OrchestrationMixin:
             source_submaterials_by_index = self._submaterials_by_index(source_sidecar_path, source_sidecar)
             target_submaterials_by_index = self._submaterials_by_index(sidecar_path, sidecar)
             for slot_index, mapped_index in enumerate(slot_mapping):
+                if mapped_index == ABSENT_SLOT and slot_index < len(obj.material_slots):
+                    slot = obj.material_slots[slot_index]
+                    replaced_material = slot.material
+                    slot.link = "OBJECT"
+                    slot.material = self._absent_slot_material()
+                    if replaced_material is not slot.material:
+                        self._remove_replaced_slot_material(replaced_material)
+                    continue
                 fallback_index = mapped_index if mapped_index is not None else slot_index
                 source_submaterial = source_submaterials_by_index.get(fallback_index)
                 slot_material = (
