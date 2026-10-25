@@ -563,7 +563,12 @@ pub(crate) fn variant_subgeometry(db: &Database, record: &Record) -> Option<Worn
         for sub in subs {
             for tag in get_value_string(sub, "Tags").unwrap_or("").split_whitespace() {
                 let lower = tag.to_lowercase();
-                if short.ends_with(&format!("_{lower}")) && best.as_ref().is_none_or(|b| b.len() < tag.len()) {
+                // grin_tractor_01_iasi is tagged Iasi01: a trailing number
+                // on the tag may be absent from the name.
+                let bare = lower.trim_end_matches(|c: char| c.is_ascii_digit());
+                let matches = short.ends_with(&format!("_{lower}"))
+                    || (!bare.is_empty() && bare != lower && short.ends_with(&format!("_{bare}")));
+                if matches && best.as_ref().is_none_or(|b| b.len() < tag.len()) {
                     best = Some(tag.to_string());
                 }
             }
