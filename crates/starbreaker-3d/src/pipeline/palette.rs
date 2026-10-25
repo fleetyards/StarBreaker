@@ -574,10 +574,18 @@ pub(crate) fn variant_subgeometry(db: &Database, record: &Record) -> Option<Worn
             }
         }
     }
-    worn_subgeometry(db, record, &best?)
+    tagged_subgeometry(db, record, &best?, false)
 }
 
 pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Option<WornGeometry> {
+    tagged_subgeometry(db, record, tag, true)
+}
+
+/// The SubGeometry tagged `tag`; `sibling_material` lets an entry without
+/// a material borrow a sibling's (worn armour: the Morozov-SH core's male
+/// entry names none). Paint variants must not: the LH86's palette-only
+/// variants (Gold01, Cen01, ...) took Black02's livery material.
+fn tagged_subgeometry(db: &Database, record: &Record, tag: &str, sibling_material: bool) -> Option<WornGeometry> {
     let compiled = db.compile_path::<Value>(record.struct_id(), "Components[SGeometryResourceParams]").ok()?;
     let components = db.query::<Value>(&compiled, record).unwrap_or_default();
     let sub_material = |sub: &Value| -> Option<String> {
@@ -630,7 +638,7 @@ pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Opt
                     .filter(|p| !p.is_empty())
                     .map(str::to_string)
             })
-            .or_else(|| subs.iter().find_map(|other| sub_material(other)))
+            .or_else(|| if sibling_material { subs.iter().find_map(|other| sub_material(other)) } else { None })
             .unwrap_or_default();
         let palette = stored
             .and_then(|child| get_value_field(child, "Geometry"))
