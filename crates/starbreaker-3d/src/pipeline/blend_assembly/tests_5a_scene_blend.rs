@@ -2091,6 +2091,7 @@ fn create_test_input(
             containers: vec![],
         },
         paint_variants: vec![],
+        loadout: serde_json::Value::Null,
     }
 }
 

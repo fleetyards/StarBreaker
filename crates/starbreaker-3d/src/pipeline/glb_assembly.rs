@@ -425,6 +425,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             nested_vehicle_names,
             interiors: loaded_interiors,
             paint_variants,
+            loadout: crate::decomposed::loadout_json(&tree.root.children),
         };
         
         let phase_start = Instant::now();
@@ -550,6 +551,7 @@ pub fn export_geometry_decomposed(
         nested_vehicle_names: HashSet::new(),
         interiors: LoadedInteriors::default(),
         paint_variants: Vec::new(),
+        loadout: serde_json::Value::Null,
     };
     let decomposed = crate::pipeline::write_decomposed_export_blend(
         p4k,

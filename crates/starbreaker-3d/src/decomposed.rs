@@ -39,6 +39,9 @@ pub(crate) struct DecomposedInput {
     pub interiors: LoadedInteriors,
     /// All available paint variants for this entity, populated from SubGeometry entries.
     pub paint_variants: Vec<crate::mtl::PaintVariant>,
+    /// The default loadout as resolved from the DataCore, every node
+    /// whether or not it has geometry (`loadout_json`); Null for none.
+    pub loadout: serde_json::Value,
 }
 
 pub(crate) type ExistingInteriorAssetMap = HashMap<String, (String, Option<String>)>;
@@ -1724,6 +1727,7 @@ pub(crate) fn write_decomposed_export(
         &child_instances,
         &interior_records,
         &engine_glow_targets,
+        &input.loadout,
         opts,
     );
     report_progress(progress, INTERIOR_ASSETS_END, "Writing manifests");
@@ -1786,6 +1790,7 @@ fn build_scene_manifest_value(
     child_instances: &[SceneInstanceRecord],
     interiors: &[InteriorContainerRecord],
     engine_glow_targets: &[EngineGlowTargetRecord],
+    loadout: &serde_json::Value,
     opts: &ExportOptions,
 ) -> serde_json::Value {
     let mut manifest = serde_json::json!({
@@ -1822,6 +1827,9 @@ fn build_scene_manifest_value(
 
     if let Some(animations) = root_animations {
         manifest["root_entity"]["animations"] = animations.clone();
+    }
+    if loadout.is_array() {
+        manifest["loadout"] = loadout.clone();
     }
     if !engine_glow_targets.is_empty() {
         manifest["controls"] = serde_json::json!({
@@ -1953,6 +1961,28 @@ fn build_livery_manifest_value(records: &BTreeMap<String, LiveryUsage>) -> serde
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+/// The loadout tree for scene.json: items without geometry (shield
+/// generators are skipped unless --include-shields, controllers have
+/// none) never become `children`, but a loadout preview still needs to
+/// know which item the game mounts on each port.
+pub(crate) fn loadout_json(nodes: &[starbreaker_datacore::loadout::LoadoutNode]) -> serde_json::Value {
+    serde_json::Value::Array(
+        nodes
+            .iter()
+            .map(|node| {
+                serde_json::json!({
+                    "entity_name": node.entity_name,
+                    "item_port": node.item_port_name,
+                    "helper": node.helper_bone_name,
+                    "port_flags": node.port_flags,
+                    "geometry_path": node.geometry_path,
+                    "children": loadout_json(&node.children),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn scene_instance_json(instance: &SceneInstanceRecord) -> serde_json::Value {
@@ -4663,6 +4693,7 @@ mod tests {
             &[child],
             &[interior],
             &[],
+            &serde_json::Value::Null,
             &ExportOptions::default(),
         );
 
@@ -4701,6 +4732,7 @@ mod tests {
                 submaterial_name: "Glow_Thrusters".into(),
                 blender_material_name: "root:Glow_Thrusters".into(),
             }],
+            &serde_json::Value::Null,
             &ExportOptions::default(),
         );
 

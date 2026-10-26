@@ -39,6 +39,7 @@ fn assign_decal_materials_basic() {
         children: vec![],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
+        loadout: serde_json::Value::Null,
     };
 
     let result = assign_decal_materials_to_vertex_groups(&input);
@@ -77,6 +78,7 @@ fn assign_decal_materials_no_materials() {
         children: vec![],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
+        loadout: serde_json::Value::Null,
     };
 
     let result = assign_decal_materials_to_vertex_groups(&input);
@@ -115,6 +117,7 @@ fn assign_decal_materials_empty_mesh() {
         children: vec![],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
+        loadout: serde_json::Value::Null,
     };
 
     let result = assign_decal_materials_to_vertex_groups(&input);
@@ -190,6 +193,7 @@ fn assign_decal_materials_multiple_children() {
         ],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
+        loadout: serde_json::Value::Null,
     };
 
     let result = assign_decal_materials_to_vertex_groups(&input);
@@ -269,6 +273,7 @@ fn assign_decal_materials_with_child_mesh() {
         ],
         interiors: LoadedInteriors::default(),
         paint_variants: vec![],
+        loadout: serde_json::Value::Null,
     };
 
     let result = assign_decal_materials_to_vertex_groups(&input);
