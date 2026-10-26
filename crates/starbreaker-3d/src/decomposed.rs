@@ -1978,6 +1978,7 @@ pub(crate) fn loadout_json(nodes: &[starbreaker_datacore::loadout::LoadoutNode])
                     "helper": node.helper_bone_name,
                     "port_flags": node.port_flags,
                     "geometry_path": node.geometry_path,
+                    "own_default": node.own_default,
                     "children": loadout_json(&node.children),
                 })
             })

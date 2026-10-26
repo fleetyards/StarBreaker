@@ -29,6 +29,11 @@ pub struct LoadoutNode {
     pub port_flags: String,
     /// Port tags from SItemPortContainerComponentParams (e.g., for SubGeometry variant selection).
     pub port_tags: String,
+    /// The node comes from its parent item's own data (the item's default
+    /// loadout or a port's `defaultItem`), not from an entry the parent's
+    /// loadout lists for it: the gatling's barrel, not the rack's missiles.
+    /// Such a child is part of the item wherever the item is exported.
+    pub own_default: bool,
     /// Geometry file path from SGeometryResourceParams, if present.
     pub geometry_path: Option<String>,
     /// Material file path from SGeometryResourceParams, if present.
@@ -756,7 +761,7 @@ pub fn resolve_loadout_indexed(idx: &EntityIndex, record: &Record) -> LoadoutTre
             let mut result = Vec::new();
             for component in &components {
                 if let Some(loadout) = get_object_field(component, "loadout") {
-                    collect_entries_recursive(idx, loadout, &mut result, 0);
+                    collect_entries_recursive(idx, loadout, &mut result, 0, true);
                 }
             }
             result
@@ -801,6 +806,7 @@ pub fn resolve_loadout_indexed(idx: &EntityIndex, record: &Record) -> LoadoutTre
             detach_direction: [0.0; 3],
             port_flags: String::new(),
             port_tags: String::new(),
+            own_default: false,
             geometry_path,
             material_path,
             children,
@@ -1138,7 +1144,7 @@ fn collect_default_loadout(idx: &EntityIndex, record: &Record, out: &mut Vec<Loa
                         listed.insert(port.to_ascii_lowercase());
                     }
                 }
-                collect_entries_recursive(idx, loadout, out, depth);
+                collect_entries_recursive(idx, loadout, out, depth, true);
             }
         }
     }
@@ -1205,6 +1211,7 @@ fn collect_port_default_items(
                 detach_direction: [0.0; 3],
                 port_flags: String::new(),
                 port_tags: String::new(),
+                own_default: true,
                 geometry_path,
                 material_path,
                 children,
@@ -1223,6 +1230,7 @@ fn collect_entries_recursive(
     loadout_value: &Value,
     out: &mut Vec<LoadoutNode>,
     depth: usize,
+    own_default: bool,
 ) {
     if depth >= MAX_LOADOUT_DEPTH {
         return;
@@ -1242,7 +1250,7 @@ fn collect_entries_recursive(
         // Recurse into the entry's own nested loadout (from the parent's Value tree)
         let mut grandchildren = Vec::new();
         if let Some(nested_loadout) = get_object_field(entry, "loadout") {
-            collect_entries_recursive(idx, nested_loadout, &mut grandchildren, depth + 1);
+            collect_entries_recursive(idx, nested_loadout, &mut grandchildren, depth + 1, false);
         }
 
         if !class_name.is_empty() {
@@ -1279,6 +1287,7 @@ fn collect_entries_recursive(
             detach_direction: [0.0; 3],
             port_flags: String::new(),
             port_tags: String::new(),
+            own_default: own_default,
                     geometry_path: child_geom,
                     material_path: child_mtl,
                     children: grandchildren,
@@ -1296,7 +1305,7 @@ fn collect_entries_recursive(
 
             // Also walk the referenced entity's own loadout for further children
             if let Some(ref_loadout) = extract_loadout_from_value(ref_val) {
-                collect_entries_recursive(idx, ref_loadout, &mut grandchildren, depth + 1);
+                collect_entries_recursive(idx, ref_loadout, &mut grandchildren, depth + 1, true);
             }
 
             // Resolve the entity record. Prefer the record_id stamped by the
@@ -1365,6 +1374,7 @@ fn collect_entries_recursive(
                     detach_direction: [0.0; 3],
                     port_flags: String::new(),
                     port_tags: String::new(),
+                    own_default: own_default,
                     geometry_path: ref_geom,
                     material_path: ref_mtl,
                     children: grandchildren,
@@ -1387,6 +1397,7 @@ fn collect_entries_recursive(
                     detach_direction: [0.0; 3],
                     port_flags: String::new(),
                     port_tags: String::new(),
+                    own_default: own_default,
                     geometry_path: ref_geom,
                     material_path: ref_mtl,
                     children: grandchildren,
@@ -1423,6 +1434,7 @@ fn collect_entries_recursive(
             detach_direction: [0.0; 3],
             port_flags: String::new(),
             port_tags: String::new(),
+            own_default: own_default,
                     geometry_path: ref_geom,
                     material_path: ref_mtl,
                     children: grandchildren,
