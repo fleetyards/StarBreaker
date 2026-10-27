@@ -65,6 +65,8 @@ class StencilOverlaySockets:
     stencil_diffuse_color_2: tuple[float, float, float] = (1.0, 1.0, 1.0)
     stencil_diffuse_color_3: tuple[float, float, float] = (1.0, 1.0, 1.0)
     tone_mode: float = 0.0
+    tint_override: float = 0.0   # StencilTintOverride: the mask's channels pick the palette tints
+    is_virtual: bool = False     # the tint palette's own decal, not an authored stencil texture
 
 
 @dataclass(frozen=True)

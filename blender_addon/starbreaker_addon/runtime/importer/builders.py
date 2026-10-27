@@ -1443,7 +1443,7 @@ class BuildersMixin:
         damage_factor = self._layered_damage_factor_socket(nodes, links, submaterial, x=-720, y=-240)
         iridescence_ramp_color = self._iridescence_ramp_color_socket(nodes, links, submaterial, x=-980, y=-1560)
         stencil = self._hard_surface_stencil_overlay_sockets(nodes, links, submaterial, x=-980, y=-1820)
-        self._link_hard_surface_stencil_paint(nodes, links, submaterial, stencil, x=-700, y=520)
+        self._link_hard_surface_stencil_paint(nodes, links, submaterial, stencil, x=-700, y=520, palette=palette)
 
         macro_normal_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot3",), roles=("normal_gloss",))
         macro_normal_node = self._image_node(

@@ -54,6 +54,9 @@ def _detail_strength_or_zero(strength: float, mask_socket: Any) -> float:
     return float(strength) if mask_socket is not None else 0.0
 
 
+STENCIL_OBJECT_TILE_M = 2.0   # metres per tile of a stencil mask projected in object space
+
+
 def _stencil_override_selection(
     tint_override: float,
     *,
@@ -628,6 +631,24 @@ class LayersMixin:
         )
         if stencil_node is None:
             return StencilOverlaySockets()
+        if stencil_uv_map is None and not stencil_ref.is_virtual:
+            # Without UseUV2ForStencil the mask is not read through the hull's
+            # tiling UV (every panel would show an unrelated shard of it, the
+            # Gladius Nightbreak came out as triangles): a seamless camo mask is
+            # projected in object space, STENCIL_OBJECT_TILE_M metres per tile.
+            for link in list(stencil_node.inputs["Vector"].links):
+                links.remove(link)
+            coords = nodes.new("ShaderNodeTexCoord")
+            coords.location = (x - 520, y - 200)
+            mapping = nodes.new("ShaderNodeMapping")
+            mapping.location = (x - 320, y - 200)
+            mapping.vector_type = "POINT"
+            scale = (stencil_tiling if stencil_tiling and stencil_tiling > 0.0 else 1.0) / STENCIL_OBJECT_TILE_M
+            mapping.inputs["Scale"].default_value = (scale, scale, scale)
+            links.new(coords.outputs["Object"], mapping.inputs["Vector"])
+            links.new(mapping.outputs["Vector"], stencil_node.inputs["Vector"])
+            stencil_node.projection = "BOX"
+            stencil_node.projection_blend = 0.25
 
         stencil_diffuse_color = _public_param_triplet(
             submaterial,
@@ -648,12 +669,17 @@ class LayersMixin:
             "StencilDiffuse3",
         ) or (1.0, 1.0, 1.0)
         tint_override = _optional_float_public_param(submaterial, "StencilTintOverride") or 0.0
+        # The group's tone path (a faint multiply) is for the palette's own
+        # decal only; an authored stencil is painted into the primary layer's
+        # colour by _link_hard_surface_stencil_paint, with or without override.
         return StencilOverlaySockets(
             color=stencil_node.outputs[0],
             stencil_diffuse_color=stencil_diffuse_color,
             stencil_diffuse_color_2=stencil_diffuse_color_2,
             stencil_diffuse_color_3=stencil_diffuse_color_3,
-            tone_mode=tint_override if tint_override > 0.0 else (1.0 if stencil_ref.is_virtual else 0.0),
+            tone_mode=1.0 if stencil_ref.is_virtual else 0.0,
+            tint_override=tint_override,
+            is_virtual=bool(stencil_ref.is_virtual),
         )
 
     def _link_hard_surface_stencil_paint(
@@ -665,18 +691,26 @@ class LayersMixin:
         *,
         x: int,
         y: int,
+        palette: Any = None,
     ) -> None:
         """Paint a HardSurface ``STENCIL_MAP`` into the primary layer's colour.
 
-        A stencil without a tint override (``StencilTintOverride`` 0, not a
-        virtual tint-palette source) is a paint pattern: its mask's channels
-        are nested -- blue covers green covers red -- and pick
-        StencilDiffuseColor3, 2 and 1 in that order, which take the place of
-        the palette tint under the layer's own diffuse. The TMBL Nova's
-        default woodland camo (camo_stencil_03_mask: tan, green, dark green)
-        came out as the bare near-black palette without it.
+        A stencil (not a virtual tint-palette source) is a paint pattern: its
+        mask's channels are nested -- blue covers green covers red -- and pick
+        three colours in that order, which take the place of the palette tint
+        under the layer's own diffuse. Without ``StencilTintOverride`` those
+        are StencilDiffuseColor3, 2 and 1 (the TMBL Nova's default woodland
+        camo, camo_stencil_03_mask: tan, green, dark green, came out as the
+        bare near-black palette without it). With the override set they are
+        the tint palette's entries 3, 2 and 1, so a paint's camo recolours
+        with the paint: the Gladius Frostbite / Nightbreak / Disrupt Camo
+        liveries (camo_fw2021_stencil_mask, camo_stencil_02_mask, the
+        geometric stencil) rendered as the flat palette without it.
         """
-        if stencil.color is None or stencil.tone_mode > 0.0:
+        if stencil.color is None or stencil.is_virtual:
+            return
+        override = stencil.tint_override > 0.0 and palette is not None
+        if stencil.tone_mode > 0.0 and not override:
             return
         opacity = _optional_float_public_param(submaterial, "StencilOpacity")
         if opacity is not None and opacity <= 0.0:
@@ -690,6 +724,8 @@ class LayersMixin:
         target = _input_socket(layer, "Palette Color")
         original = target.links[0].from_socket if target.is_linked else None
 
+        palette_slots = {2: "tertiary", 1: "secondary", 0: "primary"}
+        breakup = _optional_float_public_param(submaterial, "StencilDiffuseBreakup") or 0.0
         channels = nodes.new("ShaderNodeSeparateColor")
         channels.location = (x - 400, y)
         links.new(stencil.color, channels.inputs[0])
@@ -698,15 +734,32 @@ class LayersMixin:
         for index, (channel, color) in enumerate(
             ((2, stencil.stencil_diffuse_color_3), (1, stencil.stencil_diffuse_color_2), (0, stencil.stencil_diffuse_color))
         ):
+            # The masks are soft gradients (camo_fw2021_stencil_mask blurs over
+            # half a tile); the game draws them with a hard edge, broken up by
+            # StencilDiffuseBreakup. A smoothstep around 0.5 gives the shapes.
+            edge = nodes.new("ShaderNodeMapRange")
+            edge.location = (x - 100, y - 160 * index)
+            edge.data_type = "FLOAT"
+            edge.interpolation_type = "SMOOTHSTEP"
+            half = 0.08 + 0.12 * min(1.0, max(0.0, breakup))
+            edge.inputs["From Min"].default_value = 0.5 - half
+            edge.inputs["From Max"].default_value = 0.5 + half
+            links.new(channels.outputs[channel], edge.inputs["Value"])
             mix = nodes.new("ShaderNodeMixRGB")
             mix.location = (x - 200 + index * 160, y)
             mix.blend_type = "MIX"
-            links.new(channels.outputs[channel], mix.inputs[0])
+            links.new(edge.outputs["Result"], mix.inputs[0])
             if current is not None:
                 links.new(current, mix.inputs[1])
             else:
                 mix.inputs[1].default_value = current_default
-            mix.inputs[2].default_value = (*color, 1.0)
+            if override:
+                links.new(
+                    self._palette_color_socket(nodes, palette, palette_slots[channel], x=x - 600, y=y - 220 * index),
+                    mix.inputs[2],
+                )
+            else:
+                mix.inputs[2].default_value = (*color, 1.0)
             current = mix.outputs[0]
         if opacity is not None and opacity < 1.0:
             blend = nodes.new("ShaderNodeMixRGB")
