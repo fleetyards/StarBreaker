@@ -2704,7 +2704,17 @@ class BuildersMixin:
             red.operation = "MULTIPLY"
             red.location = (x + 50, y + 500)
             links.new(split.outputs[0], red.inputs[0])
-            links.new(wear_node.outputs["Color"], red.inputs[1])
+            # Only the darkest mask lets the layer below through: scaled
+            # linearly, the Ace Interceptor's speckled mask (a quarter of it
+            # near black) turned half the dark shell into white flecks. The
+            # shop shot has fine scratches, which is what x4 leaves.
+            sharp = nodes.new("ShaderNodeMath")
+            sharp.operation = "MULTIPLY"
+            sharp.use_clamp = True
+            sharp.location = (x - 100, y + 600)
+            sharp.inputs[1].default_value = 4.0
+            links.new(wear_node.outputs["Color"], sharp.inputs[0])
+            links.new(sharp.outputs[0], red.inputs[1])
             join = nodes.new("ShaderNodeCombineColor")
             join.location = (x + 50, y + 350)
             links.new(red.outputs[0], join.inputs[0])
