@@ -1793,15 +1793,19 @@ class BuildersMixin:
         links.new(colour.outputs[0], mixed.inputs[2])
         return mixed.outputs[0], mask.outputs["Result"], colour.outputs[0]
 
-    def _legacy_blend_layer_mask(self, nodes: Any, links: Any, submaterial: SubmaterialRecord, invert_alpha: bool = False) -> Any:
+    def _legacy_blend_layer_mask(self, nodes: Any, links: Any, submaterial: SubmaterialRecord) -> Any:
         """CryEngine 3 Illum %BLENDLAYER: the blend map (TexSlot12, red) times
-        the vertex alpha, scaled by 1 + BlendFactor, to the power BlendFalloff.
+        the vertex alpha, to the power BlendFalloff.
 
-        `invert_alpha`: the painted vertex alpha keeps the primary layer and
-        lets the blend layer through where it is low (1 - alpha). Verified on
-        the Origin 300i against the Fleetyards reference (white hull, thin dark
-        trims); with the alpha as is the hull came out mostly dark. The
-        concept models' legacy path keeps the plain alpha they were approved with."""
+        The vertex colour node names the exporter's `Color` attribute: the
+        meshes have no active colour attribute, so an unnamed node read alpha
+        0 and the blend layer never showed (the Origin 300i stayed its dark
+        primary layer instead of white). BlendFactor is not multiplied in:
+        the authored values (5.6 on the 300i, 9.7 on the Gladiator's blacks)
+        saturate every vertex to the blend layer, which turned the Gladiator
+        black; mask x alpha alone matches the Fleetyards references of both
+        (white 300i, dark olive Gladiator). The real engine curve is not
+        published; this is the empirical fit."""
         mask_node = self._image_node(nodes, self._texture_path_for_slot(submaterial, "TexSlot12"), x=-1100, y=160, is_color=False)
         if mask_node is None:
             return None
@@ -1820,18 +1824,11 @@ class BuildersMixin:
         links.new(mask_node.outputs["Color"], split.inputs[0])
         vertex = nodes.new("ShaderNodeVertexColor")
         vertex.location = (-900, 0)
+        vertex.layer_name = "Color"
         factor = split.outputs[0]
         alpha_socket = vertex.outputs["Alpha"]
-        if invert_alpha:
-            inv = nodes.new("ShaderNodeMath")
-            inv.operation = "SUBTRACT"
-            inv.inputs[0].default_value = 1.0
-            inv.location = (-800, 80)
-            links.new(alpha_socket, inv.inputs[1])
-            alpha_socket = inv.outputs[0]
         for operation, value, location in (
             ("MULTIPLY", None, -700),
-            ("MULTIPLY", 1.0 + _float_public_param(submaterial, "BlendFactor"), -540),
             ("POWER", _float_public_param(submaterial, "BlendFalloff") or 1.0, -380),
         ):
             math = nodes.new("ShaderNodeMath")
@@ -2134,7 +2131,7 @@ class BuildersMixin:
             self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
             self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
         if (legacy_tints or authored_blend) and blend_mask_socket is None and secondary.color is not None:
-            blend_mask_socket = self._legacy_blend_layer_mask(nodes, links, submaterial, invert_alpha=authored_blend)
+            blend_mask_socket = self._legacy_blend_layer_mask(nodes, links, submaterial)
         self._link_group_input(links, blend_mask_socket, shader_group, "Blend Mask")
         if plan.template_key == "parallax_pom":
             self._link_group_input(links, height_primary, shader_group, "Primary Height")
