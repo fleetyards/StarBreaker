@@ -1793,9 +1793,15 @@ class BuildersMixin:
         links.new(colour.outputs[0], mixed.inputs[2])
         return mixed.outputs[0], mask.outputs["Result"], colour.outputs[0]
 
-    def _legacy_blend_layer_mask(self, nodes: Any, links: Any, submaterial: SubmaterialRecord) -> Any:
+    def _legacy_blend_layer_mask(self, nodes: Any, links: Any, submaterial: SubmaterialRecord, invert_alpha: bool = False) -> Any:
         """CryEngine 3 Illum %BLENDLAYER: the blend map (TexSlot12, red) times
-        the vertex alpha, scaled by 1 + BlendFactor, to the power BlendFalloff."""
+        the vertex alpha, scaled by 1 + BlendFactor, to the power BlendFalloff.
+
+        `invert_alpha`: the painted vertex alpha keeps the primary layer and
+        lets the blend layer through where it is low (1 - alpha). Verified on
+        the Origin 300i against the Fleetyards reference (white hull, thin dark
+        trims); with the alpha as is the hull came out mostly dark. The
+        concept models' legacy path keeps the plain alpha they were approved with."""
         mask_node = self._image_node(nodes, self._texture_path_for_slot(submaterial, "TexSlot12"), x=-1100, y=160, is_color=False)
         if mask_node is None:
             return None
@@ -1815,6 +1821,14 @@ class BuildersMixin:
         vertex = nodes.new("ShaderNodeVertexColor")
         vertex.location = (-900, 0)
         factor = split.outputs[0]
+        alpha_socket = vertex.outputs["Alpha"]
+        if invert_alpha:
+            inv = nodes.new("ShaderNodeMath")
+            inv.operation = "SUBTRACT"
+            inv.inputs[0].default_value = 1.0
+            inv.location = (-800, 80)
+            links.new(alpha_socket, inv.inputs[1])
+            alpha_socket = inv.outputs[0]
         for operation, value, location in (
             ("MULTIPLY", None, -700),
             ("MULTIPLY", 1.0 + _float_public_param(submaterial, "BlendFactor"), -540),
@@ -1826,7 +1840,7 @@ class BuildersMixin:
             math.location = (location, 160)
             links.new(factor, math.inputs[0])
             if value is None:
-                links.new(vertex.outputs["Alpha"], math.inputs[1])
+                links.new(alpha_socket, math.inputs[1])
             else:
                 math.inputs[1].default_value = value
             factor = math.outputs[0]
@@ -1862,8 +1876,15 @@ class BuildersMixin:
         # and BlendLayer2DiffuseColor on the blend layer, as CryEngine's old
         # Illum multiplied them into the diffuse maps.
         legacy_tints = palette is None and material_channel is None
+        # An Illum %BLENDLAYER whose submaterial has no palette routing is the
+        # same old shader even when the package carries a default palette
+        # (the Origin 300 series: hull_a..d, blend map dust_blend_diff,
+        # BlendFactor 4.5-15): its blend layer is BlendLayer2DiffuseColor over
+        # the mask, in game the layer that dominates. Without this the 300i
+        # and 315p rendered as the bare primary layer, dark grey.
+        authored_blend = material_channel is None and submaterial.decoded_feature_flags.has_blend_layer
         primary_tint = _authored_attribute_triplet(submaterial, "Diffuse") if legacy_tints else None
-        secondary_tint = _public_param_triplet(submaterial, "BlendLayer2DiffuseColor") if legacy_tints else None
+        secondary_tint = _public_param_triplet(submaterial, "BlendLayer2DiffuseColor") if (legacy_tints or authored_blend) else None
         # ...and blended a surface with Opacity below 1 by its diffuse alpha
         # (the Kraken logo: white RGB, the emblem only in alpha).
         legacy_alpha = legacy_tints and 0.0 < _float_authored_attribute(submaterial, "Opacity") < 1.0 - 1e-4
@@ -2112,8 +2133,8 @@ class BuildersMixin:
             self._link_group_input(links, secondary.roughness, shader_group, "Secondary Roughness")
             self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
             self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
-        if legacy_tints and blend_mask_socket is None and secondary.color is not None:
-            blend_mask_socket = self._legacy_blend_layer_mask(nodes, links, submaterial)
+        if (legacy_tints or authored_blend) and blend_mask_socket is None and secondary.color is not None:
+            blend_mask_socket = self._legacy_blend_layer_mask(nodes, links, submaterial, invert_alpha=authored_blend)
         self._link_group_input(links, blend_mask_socket, shader_group, "Blend Mask")
         if plan.template_key == "parallax_pom":
             self._link_group_input(links, height_primary, shader_group, "Primary Height")
