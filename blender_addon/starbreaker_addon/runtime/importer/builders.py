@@ -1135,9 +1135,11 @@ class BuildersMixin:
                         and isinstance(resolved, (int, float))
                     ):
                         # The template multiplies alpha by DecalFalloff, but it is the
-                        # game's angle falloff, not an opacity: Polaris Decal_Dirt (128)
-                        # turned faint dirt runs into opaque black rectangles.
-                        resolved = min(float(resolved), 1.0)
+                        # game's angle falloff, not an opacity, so it neither raises nor
+                        # lowers alpha: Polaris Decal_Dirt (128) turned faint dirt runs
+                        # into opaque black rectangles, and the Greatsword's pom_decals
+                        # (1e-4) left its receiver plates see-through.
+                        resolved = 1.0
                     if param_key == "damageperobjectwear":
                         # The authored value scales the object's wear state,
                         # which is 0 on a new item. Taken as the wear itself it
