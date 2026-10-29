@@ -1084,6 +1084,24 @@ fn load_single_mesh(
         }
     }
 
+    let mut mesh = mesh;
+    if let Some(mtl) = mtl_file.as_ref() {
+        let metadata_bytes = p4k
+            .entry_case_insensitive(&p4k_geom_path)
+            .and_then(|entry| p4k.read(entry).ok());
+        if let Some(block_size) = metadata_bytes.as_deref().and_then(mtl_name_material_count) {
+            let shifted = offset_restarted_material_blocks(&mut mesh, block_size, mtl.materials.len() as u32);
+            if shifted > 0 {
+                log::debug!(
+                    "[material-blocks] {}: {} submeshes in later blocks offset by {} per block",
+                    geometry_path,
+                    shifted,
+                    block_size
+                );
+            }
+        }
+    }
+
     let textures = if !opts.material_mode.include_textures() {
         None
     } else {
@@ -1110,6 +1128,67 @@ fn material_path_is_incompatible_with_mesh(mesh: &crate::Mesh, mtl_file: Option<
         return false;
     };
     !mesh_material_ids_fit_material_count(mesh, mtl_file.materials.len() as u32)
+}
+
+/// The material count stored after the name in the geometry file's MtlName
+/// chunk (0x83353333): the number of material ids the mesh was authored with.
+fn mtl_name_material_count(metadata: &[u8]) -> Option<u32> {
+    let chunk_file = starbreaker_chunks::ChunkFile::from_bytes(metadata).ok()?;
+    let starbreaker_chunks::ChunkFile::Ivo(ivo) = &chunk_file else {
+        return None;
+    };
+    let entry = ivo
+        .chunks()
+        .iter()
+        .find(|c| c.chunk_type == starbreaker_chunks::known_types::ivo::MTL_NAME_IVO320)?;
+    let data = ivo.chunk_data(entry);
+    let bytes: [u8; 4] = data.get(128..132)?.try_into().ok()?;
+    let count = u32::from_le_bytes(bytes);
+    (count > 0).then_some(count)
+}
+
+/// Merged weapons (`*_Merged_Weapons`) store their submeshes as blocks, each
+/// sorted by material id, and a later block numbers its ids from 0 again: in
+/// game they continue after the first block's material list. The Greatsword's
+/// second block (0, 0, 1, 1, 1, 2 after ids 1..7) is its painted receiver
+/// shell, aluminium bolt and scope glass at slots 8, 9 and 10 of its material;
+/// read as written, id 0 is the NoDraw proxy and the shell was dropped. Each
+/// second block is offset by `block_size` (the MtlName chunk's count).
+/// Applied only to exactly two blocks (unsorted skins, such as landing gear,
+/// break into more), when the first block's ids are below `block_size` and
+/// every offset id exists in the material file. Returns how many submeshes
+/// moved.
+fn offset_restarted_material_blocks(mesh: &mut crate::Mesh, block_size: u32, material_count: u32) -> usize {
+    let ids: Vec<u32> = mesh
+        .submeshes
+        .iter()
+        .map(|s| s.source_material_id.unwrap_or(s.material_id))
+        .collect();
+    let mut blocks = vec![0u32; ids.len()];
+    for i in 1..ids.len() {
+        blocks[i] = blocks[i - 1] + u32::from(ids[i] < ids[i - 1]);
+    }
+    if blocks.last().copied().unwrap_or(0) != 1 {
+        return 0;
+    }
+    let first_block_fits = ids.iter().zip(&blocks).filter(|(_, b)| **b == 0).all(|(id, _)| *id < block_size);
+    let shifted_fit = ids
+        .iter()
+        .zip(&blocks)
+        .all(|(id, b)| id + b * block_size < material_count);
+    if !first_block_fits || !shifted_fit {
+        return 0;
+    }
+    let mut moved = 0;
+    for (submesh, (id, block)) in mesh.submeshes.iter_mut().zip(ids.iter().zip(&blocks)) {
+        if *block > 0 {
+            let new_id = id + block * block_size;
+            submesh.material_id = new_id;
+            submesh.source_material_id = Some(new_id);
+            moved += 1;
+        }
+    }
+    moved
 }
 
 fn mesh_material_ids_fit_material_count(mesh: &crate::Mesh, material_count: u32) -> bool {
@@ -1151,6 +1230,54 @@ mod tests {
             scaling_max: [1.0; 3],
             skin_weights: None,
         }
+    }
+
+    fn with_ids(ids: &[u32]) -> crate::Mesh {
+        let mut mesh = plate();
+        mesh.submeshes = ids
+            .iter()
+            .map(|&id| SubMesh {
+                material_name: None,
+                material_id: id,
+                source_material_id: Some(id),
+                first_index: 0,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 0,
+                node_parent_index: 0,
+            })
+            .collect();
+        mesh
+    }
+
+    fn ids_of(mesh: &crate::Mesh) -> Vec<u32> {
+        mesh.submeshes.iter().map(|s| s.material_id).collect()
+    }
+
+    #[test]
+    fn restarted_material_block_continues_after_the_first() {
+        // KBAR_bal_can_S2_L1: ids 1..7, then 0, 0, 1, 1, 1, 2; MtlName count 8, 11 materials.
+        let mut mesh = with_ids(&[1, 1, 2, 3, 4, 5, 6, 7, 0, 0, 1, 1, 1, 2]);
+        assert_eq!(offset_restarted_material_blocks(&mut mesh, 8, 11), 6);
+        assert_eq!(ids_of(&mesh), vec![1, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 9, 10]);
+        assert_eq!(mesh.submeshes[8].source_material_id, Some(8));
+    }
+
+    #[test]
+    fn restarted_material_blocks_left_alone_when_they_do_not_fit() {
+        // Unsorted skin (landing gear): more than two blocks.
+        let mut gear = with_ids(&[7, 10, 9, 16, 8, 20, 4]);
+        assert_eq!(offset_restarted_material_blocks(&mut gear, 9, 40), 0);
+        assert_eq!(ids_of(&gear), vec![7, 10, 9, 16, 8, 20, 4]);
+        // Offset ids past the material file.
+        let mut short = with_ids(&[1, 2, 0]);
+        assert_eq!(offset_restarted_material_blocks(&mut short, 8, 8), 0);
+        // First block reaches past the MtlName count.
+        let mut wide = with_ids(&[1, 25, 2]);
+        assert_eq!(offset_restarted_material_blocks(&mut wide, 9, 40), 0);
+        // No restart.
+        let mut plain = with_ids(&[0, 1, 1, 2]);
+        assert_eq!(offset_restarted_material_blocks(&mut plain, 9, 40), 0);
     }
 
     #[test]
