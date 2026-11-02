@@ -489,6 +489,15 @@ fn export_on_skeleton(
             piece.truncated_vertices,
             piece.max_truncated_weight,
         );
+        let mut zones: Vec<&str> = Vec::new();
+        for node in &piece.submesh_nodes {
+            if starbreaker_3d::ivo::skin::is_clothing_zone(node) && !zones.contains(&node.as_str()) {
+                zones.push(node);
+            }
+        }
+        if !zones.is_empty() {
+            eprintln!("    zones: {}", zones.join(" "));
+        }
     }
     eprintln!(
         "Rigged: {} vertices, {} joints, {} unweighted vertices, {} out-of-range influences",
@@ -793,6 +802,8 @@ fn inspect(search: String, p4k_path: Option<PathBuf>, bone_weights: bool) -> Res
         skin.info.num_submeshes,
         skin.extra_words,
     );
+    let own = entry.name.rsplit(['/', '\\']).next().and_then(|f| f.split('.').next());
+    println!("Nodes: {}", skin.node_names(own).join(" "));
     for (index, submesh) in skin.submeshes.iter().enumerate() {
         println!(
             "  submesh[{index}] node_parent={} first_index={} num_indices={} first_vertex={} num_vertices={} center={:?} radius={} unknown0=0x{:08X} unknown1=0x{:08X}",

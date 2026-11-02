@@ -167,6 +167,7 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
             "unweighted_vertices": rigged.unweighted_vertices,
             "out_of_range_influences": rigged.out_of_range_influences,
             "truncated_vertices": rigged.truncated_vertices,
+            "nodes": rigged.nodes,
         });
         if let Some(donor_path) = donor_path {
             report["graft_helpers_from"] = json!(donor_path);

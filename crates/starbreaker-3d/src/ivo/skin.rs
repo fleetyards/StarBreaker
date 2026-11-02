@@ -238,8 +238,81 @@ pub struct SkinMesh {
     pub flags: u32,
     pub info: MeshInfo,
     pub submeshes: Vec<SubMeshDescriptor>,
+    /// Name hashes ([`node_name_hash`]) of the mesh's nodes, ascending; a
+    /// submesh's `node_parent_index` indexes this list. Character skins split
+    /// into clothing zone nodes (`l_hand_zone`, `torso01_zone`, ...) plus a
+    /// node named after the file stem for everything outside a zone.
     pub extra_words: Vec<u32>,
     pub streams: DataStreams,
+}
+
+/// Hash of a skin mesh node name as stored in [`SkinMesh::extra_words`]:
+/// 32-bit FNV-1a over the upper-cased name including its NUL terminator.
+pub fn node_name_hash(name: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in name.bytes().map(|b| b.to_ascii_uppercase()).chain(std::iter::once(0)) {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Every `MeshChunk` name of DataCore's `SCItemClothingParams.Chunks`
+/// (4.x): the clothing zones a worn mesh may be split into. Skin node names
+/// are only stored hashed, so these resolve them.
+pub const CLOTHING_ZONES: &[&str] = &[
+    "hips_zone", "underwear_zone", "underwear_top_zone", "vneck_zone",
+    "torso01_zone", "torso02_zone", "torso03_zone", "torso04_zone",
+    "l_shoulder_zone", "l_arm01_zone", "l_arm02_zone", "l_arm03_zone", "l_arm04_zone", "l_arm05_zone",
+    "l_arm05_torso0_zone", "l_hand_zone", "l_leg01_zone", "l_leg02_zone", "l_leg03_zone", "l_leg04_zone",
+    "l_foot_zone",
+    "r_shoulder_zone", "r_arm01_zone", "r_arm02_zone", "r_arm03_zone", "r_arm04_zone", "r_arm05_zone",
+    "r_arm05_torso0_zone", "r_hand_zone", "r_leg01_zone", "r_leg02_zone", "r_leg03_zone", "r_leg04_zone",
+    "r_foot_zone",
+    "omega_arms_zone", "omega_core_zone", "omega_legs_zone",
+    "theta_arms_zone", "theta_core_zone", "theta_head_zone", "theta_legs_zone",
+    "theta_pouch01_zone", "theta_pouch02_zone", "theta_pouch03_zone", "theta_pouch04_zone",
+    "theta_pouch05_zone", "theta_pouch06_zone",
+    "pcg_eyebrows", "pcg_l_ear", "pcg_mouth", "pcg_nose", "pcg_r_ear",
+];
+
+/// Whether `name` is a clothing zone of [`CLOTHING_ZONES`].
+pub fn is_clothing_zone(name: &str) -> bool {
+    CLOTHING_ZONES.iter().any(|z| z.eq_ignore_ascii_case(name))
+}
+
+impl SkinMesh {
+    /// Name of every node in [`Self::extra_words`] order: a clothing zone,
+    /// `own_name` (the file stem, the node outside every zone) or
+    /// `node_<hash>` when the hash matches neither.
+    pub fn node_names(&self, own_name: Option<&str>) -> Vec<String> {
+        let own = own_name.map(|n| (node_name_hash(n), n));
+        self.extra_words
+            .iter()
+            .map(|&hash| {
+                if let Some(zone) = CLOTHING_ZONES.iter().find(|z| node_name_hash(z) == hash) {
+                    return zone.to_string();
+                }
+                match own {
+                    Some((h, n)) if h == hash => n.to_string(),
+                    _ => format!("node_{hash:08x}"),
+                }
+            })
+            .collect()
+    }
+
+    /// Node name ([`Self::node_names`]) of each submesh, in submesh order.
+    /// A mesh without a node list is one node: `own_name`.
+    pub fn submesh_node_names(&self, own_name: Option<&str>) -> Vec<String> {
+        let names = self.node_names(own_name);
+        self.submeshes
+            .iter()
+            .map(|s| match names.get(s.node_parent_index as usize) {
+                Some(name) => name.clone(),
+                None if names.is_empty() => own_name.unwrap_or("node_0").to_string(),
+                None => format!("node_index_{}", s.node_parent_index),
+            })
+            .collect()
+    }
 }
 
 impl MeshInfo {
@@ -533,10 +606,18 @@ fn bgra_to_rgba(color: [u8; 4]) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::bgra_to_rgba;
+    use super::{bgra_to_rgba, node_name_hash};
 
     #[test]
     fn bgra_swizzles_to_rgba() {
         assert_eq!(bgra_to_rgba([0, 82, 255, 127]), [255, 82, 0, 127]);
+    }
+
+    #[test]
+    fn node_name_hashes_match_the_skin_node_list() {
+        // m_cds_undersuit_armor_01.skinm: extra_words [998859158, 1564911345, 3335329176].
+        assert_eq!(node_name_hash("r_hand_zone"), 998_859_158);
+        assert_eq!(node_name_hash("m_cds_undersuit_armor_01"), 1_564_911_345);
+        assert_eq!(node_name_hash("L_HAND_ZONE"), 3_335_329_176);
     }
 }

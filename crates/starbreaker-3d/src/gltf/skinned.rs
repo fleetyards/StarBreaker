@@ -18,7 +18,7 @@ use json::validation::{Checked, USize64};
 
 use super::{GlbBuilder, GlbOptions};
 use crate::error::Error;
-use crate::ivo::skin::BoneMap12;
+use crate::ivo::skin::{is_clothing_zone, BoneMap12};
 use crate::animation::SampledClip;
 use crate::skeleton::{bind_local_transforms, bone_parent, bone_world_transform, Bone};
 use crate::types::Mesh;
@@ -37,6 +37,9 @@ pub struct SkinnedGlb {
     /// strongest four (glTF/three.js read four), and the largest weight lost.
     pub truncated_vertices: usize,
     pub max_truncated_weight: f32,
+    /// Distinct skin node names of the meshes' submeshes, first-seen order
+    /// (clothing zones and each piece's own node); empty when not given.
+    pub nodes: Vec<String>,
 }
 
 /// Inverse of a rigid transform, built from its parts so the bottom row is
@@ -368,15 +371,28 @@ fn push_animations(builder: &mut GlbBuilder, bones: &[Bone], first_joint_node: u
     Ok(())
 }
 
+/// Primitive extras for a submesh on skin node `node`: `{"node"}`, plus
+/// `"zone"` when the node is a clothing zone (the unit the game hides when
+/// an item on a higher layer covers it).
+fn node_extras(node: &str) -> serde_json::Value {
+    if is_clothing_zone(node) {
+        serde_json::json!({ "zone": node, "node": node })
+    } else {
+        serde_json::json!({ "node": node })
+    }
+}
+
 /// Write the rigged skeleton of `bones` with one glTF animation per clip,
-/// and `meshes` (each with its node name) as skinned meshes bound to it, all
-/// on the one glTF skin. Without meshes the skin is still written, so
+/// and `meshes` (each with its node name and optionally the skin node name
+/// of every submesh, written as primitive extras by [`node_extras`] plus the
+/// mesh's `{"zones"}`) as skinned meshes bound to it, all on the one glTF
+/// skin. Without meshes the skin is still written, so
 /// importers build an armature from the joints.
 ///
 /// Each `mesh.skin_weights` must hold a bone map for every vertex, with joint
 /// indices into `bones` (see `types::build_skinned_mesh`).
 pub fn write_animated_skeleton_glb(
-    meshes: &[(&Mesh, Option<&str>)],
+    meshes: &[(&Mesh, Option<&str>, Option<&[String]>)],
     bones: &[Bone],
     clips: &[SampledClip],
     name: Option<&str>,
@@ -392,7 +408,7 @@ pub fn write_animated_skeleton_glb(
     builder.include_damage = opts.include_damage;
     let mut skinned_meshes = Vec::with_capacity(meshes.len());
     let (mut unweighted_vertices, mut out_of_range_influences) = (0, 0);
-    for &(mesh, mesh_name) in meshes {
+    for &(mesh, mesh_name, submesh_nodes) in meshes {
         let Some(bone_maps) = mesh.skin_weights.as_ref() else {
             return Err(Error::NotRiggable("mesh has no bone map stream".into()));
         };
@@ -400,13 +416,27 @@ pub fn write_animated_skeleton_glb(
         let skinning = push_vertex_skinning(&mut builder, mesh, bone_maps, joint_count);
         unweighted_vertices += skinning.unweighted_vertices;
         out_of_range_influences += skinning.out_of_range_influences;
-        for primitive in &mut builder.meshes_json[packed.mesh_idx as usize].primitives {
+        let mesh_json = &mut builder.meshes_json[packed.mesh_idx as usize];
+        // Without materials every submesh is one primitive, in order.
+        let nodes = submesh_nodes.filter(|n| n.len() == mesh_json.primitives.len() && n.len() == mesh.submeshes.len());
+        let mut zones: Vec<&str> = Vec::new();
+        for (index, primitive) in mesh_json.primitives.iter_mut().enumerate() {
             primitive
                 .attributes
                 .insert(Checked::Valid(json::mesh::Semantic::Joints(0)), json::Index::new(skinning.joints_accessor));
             primitive
                 .attributes
                 .insert(Checked::Valid(json::mesh::Semantic::Weights(0)), json::Index::new(skinning.weights_accessor));
+            if let Some(node) = nodes.map(|n| n[index].as_str()) {
+                primitive.extras = Some(serde_json::value::RawValue::from_string(node_extras(node).to_string())?);
+                if is_clothing_zone(node) && !zones.contains(&node) {
+                    zones.push(node);
+                }
+            }
+        }
+        if nodes.is_some() {
+            let extras = serde_json::json!({ "zones": zones });
+            mesh_json.extras = Some(serde_json::value::RawValue::from_string(extras.to_string())?);
         }
         skinned_meshes.push((packed.mesh_idx, mesh_name));
     }
@@ -428,12 +458,18 @@ pub fn write_animated_skeleton_glb(
     let glb = builder.finalize(roots, Vec::new(), &opts.metadata)?;
     Ok(SkinnedGlb {
         glb,
-        vertex_count: meshes.iter().map(|(m, _)| m.positions.len()).sum(),
+        vertex_count: meshes.iter().map(|(m, _, _)| m.positions.len()).sum(),
         joint_count,
         unweighted_vertices,
         out_of_range_influences,
         truncated_vertices: 0,
         max_truncated_weight: 0.0,
+        nodes: meshes.iter().filter_map(|(_, _, n)| *n).flatten().fold(Vec::new(), |mut all, n| {
+            if !all.contains(n) {
+                all.push(n.clone());
+            }
+            all
+        }),
     })
 }
 
@@ -578,7 +614,7 @@ mod tests {
             // Rotated 90 degrees about Z and offset from its parent.
             bone("Spine", Some(0), [0.0, 0.2, 1.4], [half, 0.0, 0.0, half]),
         ];
-        let out = write_animated_skeleton_glb(&[(&mesh(), Some("piece"))], &bones, &[], Some("piece"), &opts()).unwrap();
+        let out = write_animated_skeleton_glb(&[(&mesh(), Some("piece"), None)], &bones, &[], Some("piece"), &opts()).unwrap();
         assert_eq!(out.vertex_count, 4);
         assert_eq!(out.joint_count, 2);
         assert_eq!(out.unweighted_vertices, 1);
@@ -647,6 +683,23 @@ mod tests {
             unmatched_channels: 0,
             root_motion_removed: 0.0,
         }
+    }
+
+    #[test]
+    fn submesh_nodes_become_primitive_zone_extras() {
+        let bones = vec![
+            bone("Hips", None, [0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]),
+            bone("Spine", Some(0), [0.0, 0.0, 1.2], [1.0, 0.0, 0.0, 0.0]),
+        ];
+        let nodes = vec!["piece".to_string(), "l_hand_zone".to_string()];
+        let out = write_animated_skeleton_glb(&[(&mesh(), Some("piece"), Some(nodes.as_slice()))], &bones, &[], Some("piece"), &opts())
+            .unwrap();
+        assert_eq!(out.nodes, nodes);
+        let (root, _) = parse_glb(&out.glb);
+        let primitives = root["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(primitives[0]["extras"], serde_json::json!({ "node": "piece" }));
+        assert_eq!(primitives[1]["extras"], serde_json::json!({ "node": "l_hand_zone", "zone": "l_hand_zone" }));
+        assert_eq!(root["meshes"][0]["extras"], serde_json::json!({ "zones": ["l_hand_zone"] }));
     }
 
     #[test]

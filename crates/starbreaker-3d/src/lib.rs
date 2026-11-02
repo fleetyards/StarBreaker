@@ -135,7 +135,8 @@ pub fn animated_skeleton_glb(
     };
     let (skin_mesh, materials) = read_skin_geometry(geometry)?;
     let mesh = types::build_skinned_mesh(&skin_mesh, &materials);
-    let mut out = gltf::write_animated_skeleton_glb(&[(&mesh, name)], bones, clips, name, &bundled_glb_options())?;
+    let nodes = skin_mesh.submesh_node_names(name);
+    let mut out = gltf::write_animated_skeleton_glb(&[(&mesh, name, Some(nodes.as_slice()))], bones, clips, name, &bundled_glb_options())?;
     (out.truncated_vertices, out.max_truncated_weight) = eight_influence_truncation(&skin_mesh);
     Ok(out)
 }
@@ -172,6 +173,8 @@ pub struct PieceBinding {
     pub max_bind_angle_deg: f32,
     pub truncated_vertices: usize,
     pub max_truncated_weight: f32,
+    /// Skin node (clothing zone or the piece's own node) of each submesh.
+    pub submesh_nodes: Vec<String>,
 }
 
 /// Result of [`pieces_on_skeleton_glb`].
@@ -236,6 +239,7 @@ pub fn pieces_on_skeleton_glb(
             map.joint_indices = map.joint_indices.map(remap_joint);
         }
         (binding.truncated_vertices, binding.max_truncated_weight) = eight_influence_truncation(&skin_mesh);
+        binding.submesh_nodes = skin_mesh.submesh_node_names(Some(piece.name));
         let mut mesh = types::build_skinned_mesh(&skin_mesh, &materials);
         for submesh in &mut mesh.submeshes {
             submesh.node_parent_index = remap.get(submesh.node_parent_index as usize).map_or(0, |r| r.0);
@@ -297,7 +301,12 @@ pub fn pieces_on_skeleton_glb(
         bindings.push(binding);
     }
 
-    let named: Vec<(&types::Mesh, Option<&str>)> = meshes.iter().zip(pieces).map(|(m, p)| (m, Some(p.name))).collect();
+    let named: Vec<(&types::Mesh, Option<&str>, Option<&[String]>)> = meshes
+        .iter()
+        .zip(pieces)
+        .zip(&bindings)
+        .map(|((m, p), b)| (m, Some(p.name), Some(b.submesh_nodes.as_slice())))
+        .collect();
     let mut glb = gltf::write_animated_skeleton_glb(&named, skeleton, &[], name, &bundled_glb_options())?;
     glb.truncated_vertices = bindings.iter().map(|b| b.truncated_vertices).sum();
     glb.max_truncated_weight = bindings.iter().map(|b| b.max_truncated_weight).fold(0.0, f32::max);
@@ -477,7 +486,7 @@ pub fn rigid_on_bone_glb(
         });
         extras.push((extra.to_string(), t.to_array()));
     }
-    let named: Vec<(&types::Mesh, Option<&str>)> = meshes.iter().map(|m| (m, name)).collect();
+    let named: Vec<(&types::Mesh, Option<&str>, Option<&[String]>)> = meshes.iter().map(|m| (m, name, None)).collect();
     let glb = gltf::write_animated_skeleton_glb(&named, &bones, &[], name, &bundled_glb_options())?;
     Ok(RigidGlb {
         glb,
