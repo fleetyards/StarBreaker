@@ -8,13 +8,18 @@
 //!   {"id": "cds_combat_heavy_backpack_01_01_01", "output": "out/bp.glb",
 //!    "geometry": "Objects/Characters/Human/backpack/cds/cds_combat_heavy_backpack_01.cga",
 //!    "attach": {"bone": "backpack_attach_1_override", "item_offset_helper": "backpack_attach_1_loc",
-//!               "skeleton": "Objects/Characters/Human/male_v7/armor/cds/m_cds_heavy_armor_01_core.skin"}}
+//!               "skeleton": "Objects/Characters/Human/male_v7/armor/cds/m_cds_heavy_armor_01_core.skin",
+//!               "extra_joints": ["wep_stocked_attach_2_override", "wep_stocked_attach_3_override",
+//!                                "gadget_attach_1_override"]}}
 //! ]}
 //! ```
 //! A `.skin` is written like `skin export --rig` (its own bones). A rigid
 //! model (`.cga`/`.cgf`, or a `.cdf` whose CA_SKIN rides its own small
 //! `.chr`) is bound with weight 1 to `attach.bone` of `attach.skeleton`, its
 //! `item_offset_helper` on the bone, as the game's item port places it.
+//! Each of `attach.extra_joints` the model has as a node / `.chr` bone (a
+//! backpack's own weapon and gadget mounts) is added as a weight-less joint
+//! under `attach.bone`, at its frame in the placed model, with its own name.
 //! One JSON line per job goes to stdout.
 
 use std::path::{Path, PathBuf};
@@ -108,6 +113,11 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
     let attach = job.get("attach").ok_or_else(|| CliError::InvalidInput(format!("rigid {kind} model needs \"attach\"")))?;
     let bone = attach.get("bone").and_then(Json::as_str).ok_or_else(|| CliError::InvalidInput("attach without bone".into()))?;
     let helper = attach.get("item_offset_helper").and_then(Json::as_str).filter(|h| !h.is_empty());
+    let extra_joints: Vec<&str> = attach
+        .get("extra_joints")
+        .and_then(Json::as_array)
+        .map(|a| a.iter().filter_map(Json::as_str).collect())
+        .unwrap_or_default();
     let skeleton_path = attach.get("skeleton").and_then(Json::as_str).ok_or_else(|| CliError::InvalidInput("attach without skeleton".into()))?;
     let skeleton_data = read(p4k, skeleton_path)?;
     let skeleton = starbreaker_3d::skeleton::parse_skeleton(&skeleton_data)
@@ -145,13 +155,14 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
         }
         other => return Err(CliError::InvalidInput(format!("unsupported worn model .{other}"))),
     }
-    let rigged = starbreaker_3d::rigid_on_bone_glb(&models, &skeleton, bone, helper, Some(&name))?;
+    let rigged = starbreaker_3d::rigid_on_bone_glb(&models, &skeleton, bone, helper, &extra_joints, Some(&name))?;
     write_output(output, &rigged.glb.glb)?;
     Ok(json!({
         "ok": true, "output": output, "kind": kind, "bytes": rigged.glb.glb.len(),
         "vertices": rigged.glb.vertex_count, "joints": rigged.joints,
         "bone": bone, "bone_position": rigged.bone_position, "skeleton": skeleton_path,
         "item_offset_helper": helper, "helper_found": rigged.helper_found, "parts": parts,
+        "extra_joints": rigged.extra_joints.iter().map(|(n, p)| (n.clone(), json!(p))).collect::<serde_json::Map<_, _>>(),
     }))
 }
 

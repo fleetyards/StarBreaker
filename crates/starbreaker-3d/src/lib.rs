@@ -370,6 +370,9 @@ pub struct RigidGlb {
     pub helper_found: bool,
     /// Bind-pose world position of the attach bone (CryEngine Z-up, m).
     pub bone_position: [f32; 3],
+    /// The model's own helpers written as extra (weight-less) joints under
+    /// the attach bone: name and bind-pose world position (CryEngine Z-up, m).
+    pub extra_joints: Vec<(String, [f32; 3])>,
 }
 
 /// Write rigid `models` as a glTF skin bound with weight 1 to `bone` of
@@ -380,11 +383,18 @@ pub struct RigidGlb {
 /// bone's ancestor chain from the skeleton root with the skeleton's bind
 /// pose and names, so a viewer that drives joints by name from the
 /// character (or grafts the bone from the worn core) moves it with the body.
+///
+/// Each of `extra_joints` the model has as a helper node / bone (the
+/// backpack's own item ports: `wep_stocked_attach_2_override`, ...) becomes
+/// a joint without weights, child of the attach bone, at its model frame
+/// placed like the mesh (bone_bind * inverse(helper) * frame), with the
+/// model's name; names the model lacks are skipped.
 pub fn rigid_on_bone_glb(
     models: &[RigidModel],
     skeleton_bones: &[skeleton::Bone],
     bone: &str,
     offset_helper: Option<&str>,
+    extra_joints: &[&str],
     name: Option<&str>,
 ) -> Result<RigidGlb, Error> {
     let target = skeleton_bones
@@ -397,7 +407,7 @@ pub fn rigid_on_bone_glb(
         chain.push(parent);
     }
     chain.reverse();
-    let bones: Vec<skeleton::Bone> = chain
+    let mut bones: Vec<skeleton::Bone> = chain
         .iter()
         .enumerate()
         .map(|(k, &i)| skeleton::Bone {
@@ -440,6 +450,33 @@ pub fn rigid_on_bone_glb(
         ]);
         meshes.push(mesh);
     }
+    let mut extras = Vec::new();
+    for &extra in extra_joints {
+        let lower = extra.to_lowercase();
+        let found = models.iter().find_map(|model| {
+            let frame = model.helpers.get(&lower)?;
+            let helper = offset_helper.and_then(|h| model.helpers.get(&h.to_lowercase()));
+            Some((*frame, helper.copied()))
+        });
+        let Some(((rotation, translation), helper)) = found else { continue };
+        if bones.iter().any(|b| b.name.eq_ignore_ascii_case(extra)) {
+            continue;
+        }
+        let helper = helper.map_or(glam::Mat4::IDENTITY, |(r, t)| glam::Mat4::from_rotation_translation(r, t));
+        let world = bone_world * helper.inverse() * glam::Mat4::from_rotation_translation(rotation, translation);
+        let (_, r, t) = world.to_scale_rotation_translation();
+        let r = r.normalize();
+        bones.push(skeleton::Bone {
+            name: extra.to_string(),
+            parent_index: Some(joint),
+            object_node_index: None,
+            local_position: [0.0; 3],
+            local_rotation: [1.0, 0.0, 0.0, 0.0],
+            world_position: t.to_array(),
+            world_rotation: [r.w, r.x, r.y, r.z],
+        });
+        extras.push((extra.to_string(), t.to_array()));
+    }
     let named: Vec<(&types::Mesh, Option<&str>)> = meshes.iter().map(|m| (m, name)).collect();
     let glb = gltf::write_animated_skeleton_glb(&named, &bones, &[], name, &bundled_glb_options())?;
     Ok(RigidGlb {
@@ -447,6 +484,7 @@ pub fn rigid_on_bone_glb(
         joints: bones.iter().map(|b| b.name.clone()).collect(),
         helper_found,
         bone_position: bone_position.to_array(),
+        extra_joints: extras,
     })
 }
 
@@ -576,9 +614,23 @@ mod rigid_tests {
         };
         // The helper sits 0.1 m up in the model: that point goes onto the bone.
         let helpers = [("backpack_attach_1_loc".to_string(), (glam::Quat::IDENTITY, glam::Vec3::new(0.0, 0.0, 0.1)))].into();
+        let mut helpers: std::collections::HashMap<_, _> = helpers;
+        // The pack's own rifle mount, 0.2 m along model +X from the helper.
+        helpers.insert("wep_stocked_attach_3_override".to_string(), (glam::Quat::IDENTITY, glam::Vec3::new(0.2, 0.0, 0.1)));
         let model = RigidModel { mesh, helpers };
-        let out = rigid_on_bone_glb(&[model], &skeleton, "backpack_attach_1_override", Some("backpack_attach_1_loc"), Some("bp")).unwrap();
-        assert_eq!(out.joints, ["World", "Spine", "backpack_attach_1_override"]);
+        let out = rigid_on_bone_glb(
+            &[model],
+            &skeleton,
+            "backpack_attach_1_override",
+            Some("backpack_attach_1_loc"),
+            &["wep_stocked_attach_3_override", "gadget_attach_1_override"],
+            Some("bp"),
+        )
+        .unwrap();
+        assert_eq!(out.joints, ["World", "Spine", "backpack_attach_1_override", "wep_stocked_attach_3_override"]);
+        assert_eq!(out.extra_joints.len(), 1);
+        // Model +X -> world +Y (the bone's 90 degrees about Z).
+        assert!(glam::Vec3::from(out.extra_joints[0].1).abs_diff_eq(glam::Vec3::new(0.0, 0.0, 1.5), 1e-5), "{:?}", out.extra_joints);
         assert!(out.helper_found);
         assert_eq!(out.glb.vertex_count, 3);
 
