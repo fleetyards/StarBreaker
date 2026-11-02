@@ -65,6 +65,15 @@ pub(crate) fn export_entity_payload(
     export_entity_payload_cached(db, p4k, record, opts, &mut PngCache::new())
 }
 
+/// The SubGeometry `--worn` / `--variant-tags` export in place of the
+/// record's default model, if any.
+pub(crate) fn substituted_subgeometry(db: &Database, record: &Record, opts: &ExportOptions) -> Option<super::WornGeometry> {
+    opts.worn_subgeometry_tag
+        .as_deref()
+        .and_then(|tag| super::worn_subgeometry(db, record, tag))
+        .or_else(|| opts.variant_subgeometry.then(|| super::variant_subgeometry(db, record)).flatten())
+}
+
 fn export_entity_payload_cached(
     db: &Database,
     p4k: &MappedP4k,
@@ -110,11 +119,7 @@ fn export_entity_payload_cached(
     let material_path = db
         .query_single::<String>(&mtl_compiled, record)?
         .unwrap_or_default();
-    let worn = opts
-        .worn_subgeometry_tag
-        .as_deref()
-        .and_then(|tag| super::worn_subgeometry(db, record, tag))
-        .or_else(|| opts.variant_subgeometry.then(|| super::variant_subgeometry(db, record)).flatten());
+    let worn = substituted_subgeometry(db, record, opts);
     let base_material = material_path.clone();
     let (geometry_path, material_path) = match &worn {
         Some(w) => (

@@ -88,7 +88,25 @@ pub fn assemble_glb_with_loadout_with_progress(
         root_skeleton_source_path,
     ) = export_entity_payload(db, p4k, record, &payload_opts)?;
     log::info!("[timing] export_entity_payload: {:.2}s", phase_start.elapsed().as_secs_f32());
-    
+
+    // `--worn` / `--variant-tags` swap the record's model for a SubGeometry's
+    // (an undersuit's _prop.cgf instead of the loot crate). The node table
+    // resolved from the record belongs to the crate: its nodes named and
+    // placed the suit's parts, and the gloves hung at the crate's carry
+    // handles ($grip_left_1 / $grip_right_1). The swapped model's own table
+    // takes its place.
+    let mut resolved = resolved;
+    if let (Some(record_geometry), Some(swapped)) =
+        (resolved.geometry_path.as_deref(), super::substituted_subgeometry(db, record, &payload_opts))
+    {
+        if !same_geometry_path(record_geometry, &swapped.geometry) {
+            // What the record would resolve to with the swapped file: its own
+            // node table (none for a .cdf / .skin, whose payload table is
+            // then baked into the vertices below).
+            resolved.nmc = super::load_nmc_and_material(p4k, &swapped.geometry, &swapped.material).0;
+        }
+    }
+
     // A CDF names no node table of its own; the payload's places the parts
     // of its mesh (the P4-AR's parts.skin split per bone and rebased, the
     // HDGW Arlington's CGA nodes). Written flat, they hung around the origin;
@@ -570,4 +588,29 @@ pub fn export_geometry_decomposed(
         geometry_path,
         material_path,
     })
+}
+
+/// Two DataCore / P4k geometry paths name the same file (case, slashes and a
+/// leading `Data/` ignored).
+fn same_geometry_path(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.replace('\\', "/").to_ascii_lowercase();
+        p.strip_prefix("data/").map(str::to_string).unwrap_or(p)
+    };
+    norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod same_geometry_path_tests {
+    #[test]
+    fn ignores_case_slashes_and_data_prefix() {
+        assert!(super::same_geometry_path(
+            "Objects/Buildingsets/crate.cgf",
+            "Data\\objects\\buildingsets\\CRATE.cgf"
+        ));
+        assert!(!super::same_geometry_path(
+            "Objects/buildingsets/human/lowtech/prop/storage/crate/crate_armor_undersuit_1_005x005x005.cgf",
+            "Data/Objects/Characters/Human/male_v7/armor/ksar/m_ksar_undersuit_armor_01_prop.cgf"
+        ));
+    }
 }
