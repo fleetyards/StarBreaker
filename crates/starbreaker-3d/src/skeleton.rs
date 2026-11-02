@@ -312,3 +312,133 @@ pub fn bind_local_transforms(bones: &[Bone]) -> Vec<(glam::Quat, glam::Vec3)> {
         })
         .collect()
 }
+
+/// A bone [`graft_missing_bones`] added: its name, the name of the bone it
+/// hangs under, and whether it is only an ancestor of a grafted helper (a
+/// non-matching bone the donor chain needed because the target lacks it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraftedBone {
+    pub name: String,
+    pub parent: String,
+    pub ancestor: bool,
+}
+
+/// Copy the bones of `donor` whose name ends with `suffix` (case-insensitive,
+/// e.g. `_override`: the item-port helpers of a worn `.skin`) and that
+/// `bones` lacks into `bones`, appended after the existing ones (so the mesh
+/// bone maps stay valid). Each keeps the donor's parent-relative bind
+/// transform (`inverse(donor parent world) * donor world`) under the bone of
+/// the same name in `bones`: the helper rides its parent the way it does in
+/// the donor skeleton, whatever the two skeletons' bind poses. A donor
+/// ancestor that `bones` lacks is grafted the same way first (marked
+/// `ancestor`); a helper whose donor chain reaches the root without a bone
+/// `bones` has is skipped. Returns the bones added, in order.
+pub fn graft_missing_bones(bones: &mut Vec<Bone>, donor: &[Bone], suffix: &str) -> Vec<GraftedBone> {
+    let suffix = suffix.to_lowercase();
+    let mut index: std::collections::HashMap<String, usize> =
+        bones.iter().enumerate().map(|(i, b)| (b.name.to_lowercase(), i)).collect();
+    let mut added = Vec::new();
+    for start in 0..donor.len() {
+        let lower = donor[start].name.to_lowercase();
+        if !lower.ends_with(&suffix) || index.contains_key(&lower) {
+            continue;
+        }
+        // Donor chain up to the first bone the target has.
+        let mut chain = vec![start];
+        let anchor = loop {
+            let Some(parent) = bone_parent(donor, *chain.last().unwrap()) else { break None };
+            if chain.contains(&parent) {
+                break None;
+            }
+            if let Some(&target) = index.get(&donor[parent].name.to_lowercase()) {
+                break Some((parent, target));
+            }
+            chain.push(parent);
+        };
+        let Some((mut donor_parent, mut target_parent)) = anchor else { continue };
+        for &d in chain.iter().rev() {
+            let (dpr, dpt) = bone_world_transform(&donor[donor_parent]);
+            let (dr, dt) = bone_world_transform(&donor[d]);
+            let local_rotation = (dpr.conjugate() * dr).normalize();
+            let local_position = dpr.conjugate() * (dt - dpt);
+            let (pr, pt) = bone_world_transform(&bones[target_parent]);
+            let rotation = (pr * local_rotation).normalize();
+            let position = pt + pr * local_position;
+            let parent_name = bones[target_parent].name.clone();
+            bones.push(Bone {
+                name: donor[d].name.clone(),
+                parent_index: Some(target_parent as u16),
+                object_node_index: None,
+                local_position: local_position.to_array(),
+                local_rotation: [local_rotation.w, local_rotation.x, local_rotation.y, local_rotation.z],
+                world_position: position.to_array(),
+                world_rotation: [rotation.w, rotation.x, rotation.y, rotation.z],
+            });
+            let new = bones.len() - 1;
+            index.insert(donor[d].name.to_lowercase(), new);
+            added.push(GraftedBone { name: donor[d].name.clone(), parent: parent_name, ancestor: d != start });
+            donor_parent = d;
+            target_parent = new;
+        }
+    }
+    added
+}
+
+#[cfg(test)]
+mod graft_tests {
+    use super::*;
+
+    fn bone(name: &str, parent: Option<u16>, rotation: glam::Quat, position: glam::Vec3) -> Bone {
+        Bone {
+            name: name.into(),
+            parent_index: parent,
+            object_node_index: None,
+            local_position: [0.0; 3],
+            local_rotation: [1.0, 0.0, 0.0, 0.0],
+            world_position: position.to_array(),
+            world_rotation: [rotation.w, rotation.x, rotation.y, rotation.z],
+        }
+    }
+
+    #[test]
+    fn grafts_helpers_in_the_parent_frame() {
+        let rz = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        // Donor: Spine at 1 m, rotated 90 deg about Z; Thigh under it; a helper
+        // 0.1 m along the spine's +X, and one under a thigh twist the target lacks.
+        let donor = vec![
+            bone("Root", None, glam::Quat::IDENTITY, glam::Vec3::ZERO),
+            bone("Spine", Some(0), rz, glam::Vec3::new(0.0, 0.0, 1.0)),
+            bone("backpack_attach_1_override", Some(1), rz, glam::Vec3::new(0.0, 0.1, 1.0)),
+            bone("Thigh_sIk", Some(0), glam::Quat::IDENTITY, glam::Vec3::new(0.2, 0.0, 0.5)),
+            bone("wep_sidearm_attach_override", Some(3), glam::Quat::IDENTITY, glam::Vec3::new(0.3, 0.0, 0.5)),
+            bone("Spine_override", Some(1), rz, glam::Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        // Target: its Spine sits 0.9 m up with no rotation; it already has Spine_override.
+        let mut target = vec![
+            bone("Root", None, glam::Quat::IDENTITY, glam::Vec3::ZERO),
+            bone("Spine", Some(0), glam::Quat::IDENTITY, glam::Vec3::new(0.0, 0.0, 0.9)),
+            bone("spine_override", Some(1), glam::Quat::IDENTITY, glam::Vec3::new(0.0, 0.0, 0.9)),
+        ];
+        let added = graft_missing_bones(&mut target, &donor, "_override");
+        assert_eq!(
+            added.iter().map(|g| (g.name.as_str(), g.parent.as_str(), g.ancestor)).collect::<Vec<_>>(),
+            [
+                ("backpack_attach_1_override", "Spine", false),
+                ("Thigh_sIk", "Root", true),
+                ("wep_sidearm_attach_override", "Thigh_sIk", false),
+            ]
+        );
+        assert_eq!(target.len(), 6);
+        // 0.1 m along the spine's +X: the target spine is unrotated -> world +X.
+        let (r, t) = bone_world_transform(&target[3]);
+        assert!(t.abs_diff_eq(glam::Vec3::new(0.1, 0.0, 0.9), 1e-5), "{t:?}");
+        assert!(r.abs_diff_eq(glam::Quat::IDENTITY, 1e-5));
+        assert_eq!(target[3].parent_index, Some(1));
+        assert_eq!(target[5].parent_index, Some(4));
+        let (_, t) = bone_world_transform(&target[5]);
+        assert!(t.abs_diff_eq(glam::Vec3::new(0.3, 0.0, 0.5), 1e-5), "{t:?}");
+        // Re-deriving the locals reproduces the donor's.
+        let local = bind_local_transforms(&target);
+        assert!(local[3].1.abs_diff_eq(glam::Vec3::new(0.1, 0.0, 0.0), 1e-5));
+    }
+}

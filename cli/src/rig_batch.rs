@@ -13,7 +13,12 @@
 //!                                "gadget_attach_1_override"]}}
 //! ]}
 //! ```
-//! A `.skin` is written like `skin export --rig` (its own bones). A rigid
+//! A `.skin` is written like `skin export --rig` (its own bones). With
+//! `"graft_helpers_from": "<other .skin>"` (the male model of a female worn
+//! item), every `*_override` helper bone of that skin the job's skin lacks is
+//! added as a weight-less joint under the bone of the same name, with the
+//! donor's parent-relative bind transform (missing donor ancestors grafted
+//! too); the report lists them as `grafted`. A rigid
 //! model (`.cga`/`.cgf`, or a `.cdf` whose CA_SKIN rides its own small
 //! `.chr`) is bound with weight 1 to `attach.bone` of `attach.skeleton`, its
 //! `item_offset_helper` on the bone, as the game's item port places it.
@@ -99,15 +104,32 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
     if kind == "skin" && job.get("attach").is_none_or(Json::is_null) {
         let skin = read(p4k, geometry)?;
         let skinm = read(p4k, &format!("{geometry}m"))?;
-        let rigged = starbreaker_3d::skin_to_rigged_glb(&skinm, &skin, Some(&name))?;
+        let mut bones = starbreaker_3d::skeleton::parse_skeleton(&skin)
+            .ok_or_else(|| CliError::InvalidInput(format!("no CompiledBones in {geometry}")))?;
+        let donor_path = job.get("graft_helpers_from").and_then(Json::as_str).filter(|p| !p.is_empty());
+        let mut grafted = Vec::new();
+        if let Some(donor_path) = donor_path {
+            let donor = starbreaker_3d::skeleton::parse_skeleton(&read(p4k, donor_path)?)
+                .ok_or_else(|| CliError::InvalidInput(format!("no CompiledBones in {donor_path}")))?;
+            grafted = starbreaker_3d::skeleton::graft_missing_bones(&mut bones, &donor, "_override");
+        }
+        let rigged = starbreaker_3d::animated_skeleton_glb(&bones, Some(&skinm), &[], Some(&name))?;
         write_output(output, &rigged.glb)?;
-        return Ok(json!({
+        let mut report = json!({
             "ok": true, "output": output, "kind": "skin", "bytes": rigged.glb.len(),
             "vertices": rigged.vertex_count, "joints": rigged.joint_count,
             "unweighted_vertices": rigged.unweighted_vertices,
             "out_of_range_influences": rigged.out_of_range_influences,
             "truncated_vertices": rigged.truncated_vertices,
-        }));
+        });
+        if let Some(donor_path) = donor_path {
+            report["graft_helpers_from"] = json!(donor_path);
+            report["grafted"] = grafted
+                .iter()
+                .map(|g| json!({ "name": g.name, "parent": g.parent, "ancestor": g.ancestor }))
+                .collect();
+        }
+        return Ok(report);
     }
 
     let attach = job.get("attach").ok_or_else(|| CliError::InvalidInput(format!("rigid {kind} model needs \"attach\"")))?;
