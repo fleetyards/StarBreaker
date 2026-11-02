@@ -369,13 +369,14 @@ fn push_animations(builder: &mut GlbBuilder, bones: &[Bone], first_joint_node: u
 }
 
 /// Write the rigged skeleton of `bones` with one glTF animation per clip,
-/// and optionally `mesh` as a skinned mesh bound to it. Without a mesh the
-/// skin is still written, so importers build an armature from the joints.
+/// and `meshes` (each with its node name) as skinned meshes bound to it, all
+/// on the one glTF skin. Without meshes the skin is still written, so
+/// importers build an armature from the joints.
 ///
-/// `mesh.skin_weights` must hold a bone map for every vertex, with joint
+/// Each `mesh.skin_weights` must hold a bone map for every vertex, with joint
 /// indices into `bones` (see `types::build_skinned_mesh`).
 pub fn write_animated_skeleton_glb(
-    mesh: Option<&Mesh>,
+    meshes: &[(&Mesh, Option<&str>)],
     bones: &[Bone],
     clips: &[SampledClip],
     name: Option<&str>,
@@ -389,16 +390,16 @@ pub fn write_animated_skeleton_glb(
     let mut builder = GlbBuilder::new();
     builder.include_vertex_colors = opts.include_vertex_colors;
     builder.include_damage = opts.include_damage;
-    let mut skinned_mesh = None;
+    let mut skinned_meshes = Vec::with_capacity(meshes.len());
     let (mut unweighted_vertices, mut out_of_range_influences) = (0, 0);
-    if let Some(mesh) = mesh {
+    for &(mesh, mesh_name) in meshes {
         let Some(bone_maps) = mesh.skin_weights.as_ref() else {
             return Err(Error::NotRiggable("mesh has no bone map stream".into()));
         };
-        let packed = builder.pack_mesh(mesh, None, None, None, name, opts.material_mode, opts.preserve_textureless_decal_primitives);
+        let packed = builder.pack_mesh(mesh, None, None, None, mesh_name, opts.material_mode, opts.preserve_textureless_decal_primitives);
         let skinning = push_vertex_skinning(&mut builder, mesh, bone_maps, joint_count);
-        unweighted_vertices = skinning.unweighted_vertices;
-        out_of_range_influences = skinning.out_of_range_influences;
+        unweighted_vertices += skinning.unweighted_vertices;
+        out_of_range_influences += skinning.out_of_range_influences;
         for primitive in &mut builder.meshes_json[packed.mesh_idx as usize].primitives {
             primitive
                 .attributes
@@ -407,15 +408,15 @@ pub fn write_animated_skeleton_glb(
                 .attributes
                 .insert(Checked::Valid(json::mesh::Semantic::Weights(0)), json::Index::new(skinning.weights_accessor));
         }
-        skinned_mesh = Some(packed.mesh_idx);
+        skinned_meshes.push((packed.mesh_idx, mesh_name));
     }
 
     let (first_joint_node, roots) = push_joints(&mut builder, bones, name);
 
-    if let Some(mesh_idx) = skinned_mesh {
+    for (mesh_idx, mesh_name) in skinned_meshes {
         let mesh_node = builder.nodes_json.len() as u32;
         builder.nodes_json.push(json::Node {
-            name: name.map(String::from),
+            name: mesh_name.map(String::from),
             mesh: Some(json::Index::new(mesh_idx)),
             skin: Some(json::Index::new(0)),
             ..Default::default()
@@ -427,7 +428,7 @@ pub fn write_animated_skeleton_glb(
     let glb = builder.finalize(roots, Vec::new(), &opts.metadata)?;
     Ok(SkinnedGlb {
         glb,
-        vertex_count: mesh.map_or(0, |m| m.positions.len()),
+        vertex_count: meshes.iter().map(|(m, _)| m.positions.len()).sum(),
         joint_count,
         unweighted_vertices,
         out_of_range_influences,
@@ -577,7 +578,7 @@ mod tests {
             // Rotated 90 degrees about Z and offset from its parent.
             bone("Spine", Some(0), [0.0, 0.2, 1.4], [half, 0.0, 0.0, half]),
         ];
-        let out = write_animated_skeleton_glb(Some(&mesh()), &bones, &[], Some("piece"), &opts()).unwrap();
+        let out = write_animated_skeleton_glb(&[(&mesh(), Some("piece"))], &bones, &[], Some("piece"), &opts()).unwrap();
         assert_eq!(out.vertex_count, 4);
         assert_eq!(out.joint_count, 2);
         assert_eq!(out.unweighted_vertices, 1);
@@ -665,7 +666,7 @@ mod tests {
                 vec![(0, vec![glam::Vec3::new(0.0, 0.0, 1.0), glam::Vec3::new(0.0, 0.0, 1.05), glam::Vec3::new(0.0, 0.0, 1.0)])],
             ),
         ];
-        let out = write_animated_skeleton_glb(None, &bones, &clips, Some("rig"), &opts()).unwrap();
+        let out = write_animated_skeleton_glb(&[], &bones, &clips, Some("rig"), &opts()).unwrap();
         assert_eq!(out.vertex_count, 0);
         let (root, bin) = parse_glb(&out.glb);
         assert!(root.get("meshes").is_none_or(|m| m.as_array().unwrap().is_empty()));

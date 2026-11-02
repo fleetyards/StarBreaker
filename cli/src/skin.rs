@@ -24,6 +24,20 @@ pub enum SkinCommand {
         /// every primitive. Pieces of one character share joints by name.
         #[arg(long)]
         rig: bool,
+        /// Rig onto this skeleton (a local .chr/.skin or a P4k path substring,
+        /// e.g. `male_v7/export/bhm_skeleton_v7.chr`) instead of the piece's
+        /// own `.skin` bones; implies --rig. The joints are exactly the
+        /// skeleton's bones, so `skin animations` clips on the same skeleton
+        /// drive every joint. Piece bones the skeleton lacks (the head's
+        /// FACIAL_* bones) hand their weight to their nearest ancestor that
+        /// it has (Head, Neck1, ...): exact without facial animation.
+        #[arg(long)]
+        skeleton: Option<String>,
+        /// With --skeleton: another `.skinm` (P4k path substring or local
+        /// file) skinned into the same GLB on the same skin, one mesh node
+        /// per piece. Repeatable, e.g. a head, its eyes and teeth on a body.
+        #[arg(long = "add", requires = "skeleton")]
+        add: Vec<String>,
     },
     /// Write a rigged skeleton GLB with one glTF animation per CAF/DBA clip.
     ///
@@ -95,7 +109,10 @@ pub enum SkinCommand {
 impl SkinCommand {
     pub fn run(self) -> Result<()> {
         match self {
-            Self::Export { path, output, p4k, rig } => export(path, output, p4k, rig),
+            Self::Export { path, output, p4k, skeleton: Some(skeleton), add, .. } => {
+                export_on_skeleton(path, add, output, p4k, skeleton)
+            }
+            Self::Export { path, output, p4k, rig, skeleton: None, .. } => export(path, output, p4k, rig),
             Self::Animations { output, p4k, skeleton, clips, mesh, keep_root_motion } => {
                 animations(output, p4k, skeleton, clips, mesh, keep_root_motion)
             }
@@ -391,6 +408,78 @@ fn export(search: String, output: Option<PathBuf>, p4k_path: Option<PathBuf>, ri
     std::fs::write(&output, &glb)
         .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
     eprintln!("Written {} bytes to {}", glb.len(), output.display());
+    Ok(())
+}
+
+/// `skin export --skeleton`: `path` and every `--add` piece skinned onto one
+/// skeleton in one GLB.
+fn export_on_skeleton(
+    path: String,
+    add: Vec<String>,
+    output: Option<PathBuf>,
+    p4k_path: Option<PathBuf>,
+    skeleton_spec: String,
+) -> Result<()> {
+    let mut p4k = None;
+    let skeleton = read_source(&skeleton_spec, &[".chr", ".skin"], &mut p4k, p4k_path.as_deref())?;
+    let bones = starbreaker_3d::skeleton::parse_skeleton(&skeleton.data)
+        .ok_or_else(|| CliError::InvalidInput(format!("no CompiledBones in {}", skeleton.path)))?;
+    eprintln!("Skeleton: {} ({} bones)", skeleton.path, bones.len());
+
+    struct Loaded {
+        name: String,
+        geometry: Vec<u8>,
+        bones: Vec<starbreaker_3d::skeleton::Bone>,
+    }
+    let mut loaded = Vec::new();
+    for spec in std::iter::once(&path).chain(&add) {
+        let spec = if spec.to_lowercase().ends_with(".skin") { format!("{spec}m") } else { spec.clone() };
+        let geometry = read_source(&spec, &[".skinm"], &mut p4k, p4k_path.as_deref())?;
+        let skin_path = geometry.path.strip_suffix(['m', 'M']).unwrap_or(&geometry.path).to_string();
+        let skin = read_source(&skin_path, &[".skin"], &mut p4k, p4k_path.as_deref())?;
+        let piece_bones = starbreaker_3d::skeleton::parse_skeleton(&skin.data)
+            .ok_or_else(|| CliError::InvalidInput(format!("no CompiledBones in {}", skin.path)))?;
+        eprintln!("Piece: {}", geometry.path);
+        loaded.push(Loaded { name: clip_stem(&skin.path).to_string(), geometry: geometry.data, bones: piece_bones });
+    }
+    let pieces: Vec<starbreaker_3d::SkinPiece> = loaded
+        .iter()
+        .map(|l| starbreaker_3d::SkinPiece { geometry: &l.geometry, bones: &l.bones, name: &l.name })
+        .collect();
+    let stem = clip_stem(&skeleton.path);
+    let out = starbreaker_3d::pieces_on_skeleton_glb(&bones, &pieces, Some(stem))?;
+    for piece in &out.pieces {
+        let mut folded_into: Vec<(String, usize)> = Vec::new();
+        for (_, target) in &piece.folded_bones {
+            match folded_into.iter_mut().find(|(t, _)| t == target) {
+                Some((_, n)) => *n += 1,
+                None => folded_into.push((target.clone(), 1)),
+            }
+        }
+        let folded: Vec<String> = folded_into.iter().map(|(t, n)| format!("{n} -> {t}")).collect();
+        eprintln!(
+            "  {:<32} {:>6} vertices, {}/{} bones matched{}, {} joints used ({}), bind offset {:.4} mm / {:.4} deg, {} vertices cut to 4 influences (max weight lost {:.3})",
+            piece.name,
+            piece.vertex_count,
+            piece.matched_bones,
+            piece.piece_bones,
+            if folded.is_empty() { String::new() } else { format!(", folded {}", folded.join(", ")) },
+            piece.used_joints.len(),
+            piece.used_joints.join(" "),
+            piece.max_bind_offset * 1000.0,
+            piece.max_bind_angle_deg,
+            piece.truncated_vertices,
+            piece.max_truncated_weight,
+        );
+    }
+    eprintln!(
+        "Rigged: {} vertices, {} joints, {} unweighted vertices, {} out-of-range influences",
+        out.glb.vertex_count, out.glb.joint_count, out.glb.unweighted_vertices, out.glb.out_of_range_influences,
+    );
+    let output = output.unwrap_or_else(|| PathBuf::from(format!("{}.glb", loaded[0].name)));
+    std::fs::write(&output, &out.glb.glb)
+        .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
+    eprintln!("Written {} bytes to {}", out.glb.glb.len(), output.display());
     Ok(())
 }
 
