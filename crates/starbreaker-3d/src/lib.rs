@@ -72,6 +72,26 @@ pub(crate) fn parse_skin_with_options(data: &[u8], use_model_bbox: bool) -> Resu
 /// names and the bind pose, so body and armour pieces exported this way share
 /// one skeleton by bone name. `name` labels the mesh, node and skin.
 pub fn skin_to_rigged_glb(geometry: &[u8], skeleton: &[u8], name: Option<&str>) -> Result<SkinnedGlb, Error> {
+    let bones = skeleton::parse_skeleton(skeleton)
+        .ok_or_else(|| Error::NotRiggable("no CompiledBones chunk in the skeleton file".into()))?;
+    animated_skeleton_glb(&bones, Some(geometry), &[], name)
+}
+
+/// Write the rigged skeleton `bones` (joint nodes exactly as
+/// [`skin_to_rigged_glb`] writes them) with one glTF animation per sampled
+/// clip (see [`animation::sample_clip`]). `geometry`, a `.skinm` whose bone
+/// maps index `bones`, is skinned into the same file when given; without it
+/// the GLB carries only the skeleton (plus a mesh-less skin, so importers
+/// build an armature) and the animations.
+pub fn animated_skeleton_glb(
+    bones: &[skeleton::Bone],
+    geometry: Option<&[u8]>,
+    clips: &[animation::SampledClip],
+    name: Option<&str>,
+) -> Result<SkinnedGlb, Error> {
+    let Some(geometry) = geometry else {
+        return gltf::write_animated_skeleton_glb(None, bones, clips, name, &bundled_glb_options());
+    };
     let chunk_file = ChunkFile::from_bytes(geometry)?;
     let ivo = match &chunk_file {
         ChunkFile::Ivo(ivo) => ivo,
@@ -92,9 +112,7 @@ pub fn skin_to_rigged_glb(geometry: &[u8], skeleton: &[u8], name: Option<&str>) 
         .map(|entry| ivo::material::MaterialName::read(ivo.chunk_data(entry)))
         .collect::<Result<_, _>>()?;
     let mesh = types::build_skinned_mesh(&skin_mesh, &materials);
-    let bones = skeleton::parse_skeleton(skeleton)
-        .ok_or_else(|| Error::NotRiggable("no CompiledBones chunk in the skeleton file".into()))?;
-    let mut out = gltf::write_skinned_glb(&mesh, &bones, name, &bundled_glb_options())?;
+    let mut out = gltf::write_animated_skeleton_glb(Some(&mesh), bones, clips, name, &bundled_glb_options())?;
     if skin_mesh.streams.bone_maps.is_none() {
         for map in skin_mesh.streams.bone_maps8.iter().flatten() {
             let (_, dropped) = map.strongest_four();

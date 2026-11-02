@@ -90,6 +90,7 @@ pub(crate) struct GlbBuilder {
     pub meshes_json: Vec<json::Mesh>,
     pub nodes_json: Vec<json::Node>,
     pub skins_json: Vec<json::Skin>,
+    pub animations_json: Vec<json::Animation>,
     /// Scene roots emitted beside (not under) the `CryEngine_Z_up` wrapper.
     /// A skinned mesh node lives here: glTF ignores its parent transforms,
     /// and three.js would apply them twice through the bind matrix.
@@ -167,6 +168,7 @@ impl GlbBuilder {
             meshes_json: Vec::new(),
             nodes_json: Vec::new(),
             skins_json: Vec::new(),
+            animations_json: Vec::new(),
             unwrapped_scene_nodes: Vec::new(),
             tex_cache: HashMap::new(),
             tex_json_dedup: HashMap::new(),
@@ -1398,6 +1400,7 @@ impl GlbBuilder {
             samplers: self.samplers_json,
             nodes: self.nodes_json,
             skins: self.skins_json,
+            animations: self.animations_json,
             scenes: scenes_json,
             scene: Some(json::Index::new(0)),
             extensions_used,

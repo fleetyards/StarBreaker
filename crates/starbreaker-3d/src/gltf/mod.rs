@@ -11,7 +11,7 @@ use crate::types::{MaterialTextures, Mesh};
 
 pub(crate) use glb_builder::{offset_to_gltf_matrix, GlbBuilder, PackedMeshInfo};
 pub use skinned::SkinnedGlb;
-pub(crate) use skinned::write_skinned_glb;
+pub(crate) use skinned::write_animated_skeleton_glb;
 
 fn hierarchy_covers_bones(nmc: Option<&NodeMeshCombo>, bones: &[crate::skeleton::Bone]) -> bool {
     let Some(nmc) = nmc.filter(|nmc| !nmc.nodes.is_empty()) else {

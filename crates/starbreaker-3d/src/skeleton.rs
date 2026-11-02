@@ -278,3 +278,37 @@ impl crate::animation::BoneTransforms for Bone {
         self.world_position = p;
     }
 }
+
+/// Parent index of `bones[index]`, `None` for a root or an invalid parent.
+pub fn bone_parent(bones: &[Bone], index: usize) -> Option<usize> {
+    bones[index]
+        .parent_index
+        .map(usize::from)
+        .filter(|&parent| parent < bones.len() && parent != index)
+}
+
+/// Bind-pose world transform (model space) of a bone as rotation + translation.
+pub fn bone_world_transform(bone: &Bone) -> (glam::Quat, glam::Vec3) {
+    let [w, x, y, z] = bone.world_rotation;
+    (glam::Quat::from_xyzw(x, y, z, w).normalize(), glam::Vec3::from(bone.world_position))
+}
+
+/// Parent-relative bind-pose transform of every bone, derived from the world
+/// transforms (`inverse(parent world) * world`), so a chained hierarchy
+/// reproduces each bone's bind-pose world matrix exactly. Roots keep their
+/// world transform. This is the rest TRS of the rigged GLB joint nodes.
+pub fn bind_local_transforms(bones: &[Bone]) -> Vec<(glam::Quat, glam::Vec3)> {
+    let world: Vec<(glam::Quat, glam::Vec3)> = bones.iter().map(bone_world_transform).collect();
+    (0..bones.len())
+        .map(|index| match bone_parent(bones, index) {
+            Some(parent) => {
+                let parent_inverse = world[parent].0.conjugate();
+                (
+                    (parent_inverse * world[index].0).normalize(),
+                    parent_inverse * (world[index].1 - world[parent].1),
+                )
+            }
+            None => world[index],
+        })
+        .collect()
+}

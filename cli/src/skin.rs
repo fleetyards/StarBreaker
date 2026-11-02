@@ -25,6 +25,44 @@ pub enum SkinCommand {
         #[arg(long)]
         rig: bool,
     },
+    /// Write a rigged skeleton GLB with one glTF animation per CAF/DBA clip.
+    ///
+    /// Joint nodes are written exactly like `skin export --rig` (game bone
+    /// names, bind-pose local TRS under `CryEngine_Z_up`), so the clips play
+    /// by bone name on the body and every rigged armour piece. Use the
+    /// character's `.chr` skeleton (e.g. `male_v7/export/bhm_skeleton_v7.chr`)
+    /// so the bones of every piece (Head, face, attachment parents) animate.
+    ///
+    /// Example: `skin animations --skeleton male_v7/export/bhm_skeleton_v7.chr
+    /// --clip "male_v7/weapons/no_weapon/locomotion/stand.dba#nw_neutral_stand_runfast_forward=run_fast"
+    /// animations.glb`
+    Animations {
+        /// Output .glb path
+        output: PathBuf,
+        /// Path to Data.p4k
+        #[arg(long, env = "SC_DATA_P4K")]
+        p4k: Option<PathBuf>,
+        /// Skeleton: a local .chr/.skin file, or a P4k path substring of one
+        #[arg(long)]
+        skeleton: String,
+        /// Clip spec `<dba|caf>#<clip filter>[=<name>]`, repeatable. The file
+        /// is a local path or a P4k path substring; the filter is a
+        /// case-insensitive substring of the clip name (omit `#...` for every
+        /// clip in the file). With `=<name>` the filter must pick one clip
+        /// (an exact stem match wins); without it every match is written,
+        /// named after its .caf stem. Additive clips (`*_add`) are skipped.
+        #[arg(long = "clip", required = true)]
+        clips: Vec<String>,
+        /// Also skin the skeleton's mesh (the `.skinm` beside a `.skin`
+        /// skeleton) into the GLB. Default: skeleton and animations only.
+        #[arg(long)]
+        mesh: bool,
+        /// Keep the horizontal translation of the root bone (`World`). By
+        /// default it is removed so locomotion cycles run in place; the
+        /// vertical component, the root rotation and the Hips motion stay.
+        #[arg(long)]
+        keep_root_motion: bool,
+    },
     /// Inspect a .skinm/.skin/.cgfm/.chr file and print parsed metadata
     Inspect {
         /// P4k path substring (case-insensitive)
@@ -58,6 +96,9 @@ impl SkinCommand {
     pub fn run(self) -> Result<()> {
         match self {
             Self::Export { path, output, p4k, rig } => export(path, output, p4k, rig),
+            Self::Animations { output, p4k, skeleton, clips, mesh, keep_root_motion } => {
+                animations(output, p4k, skeleton, clips, mesh, keep_root_motion)
+            }
             Self::Inspect { path, p4k, bone_weights } => inspect(path, p4k, bone_weights),
             Self::ScanStreams { p4k } => scan_streams(p4k),
             Self::FindStream { stream_id, p4k } => find_stream(stream_id, p4k),
@@ -350,6 +391,219 @@ fn export(search: String, output: Option<PathBuf>, p4k_path: Option<PathBuf>, ri
     std::fs::write(&output, &glb)
         .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
     eprintln!("Written {} bytes to {}", glb.len(), output.display());
+    Ok(())
+}
+
+/// A file read from disk or from the P4k, with its display path.
+struct SourceFile {
+    path: String,
+    data: Vec<u8>,
+}
+
+/// Read `spec` from disk when it names an existing file, else the P4k entry
+/// whose path ends with (preferred) or contains `spec`, case-insensitively,
+/// with one of `extensions`.
+fn read_source(
+    spec: &str,
+    extensions: &[&str],
+    p4k: &mut Option<starbreaker_p4k::MappedP4k>,
+    p4k_path: Option<&std::path::Path>,
+) -> Result<SourceFile> {
+    let local = std::path::Path::new(spec);
+    if local.is_file() {
+        let data = std::fs::read(local).map_err(|e| CliError::IoPath { source: e, path: spec.to_string() })?;
+        return Ok(SourceFile { path: local.display().to_string(), data });
+    }
+    if p4k.is_none() {
+        *p4k = Some(load_p4k(p4k_path)?);
+    }
+    let p4k = p4k.as_ref().expect("p4k loaded");
+    let needle = spec.replace('/', "\\").to_lowercase();
+    let candidates: Vec<_> = p4k
+        .entries()
+        .iter()
+        .filter(|e| {
+            let name = e.name.to_lowercase();
+            extensions.iter().any(|ext| name.ends_with(ext)) && name.contains(&needle)
+        })
+        .collect();
+    let entry = candidates
+        .iter()
+        .find(|e| e.name.to_lowercase().ends_with(&needle))
+        .or_else(|| candidates.first())
+        .ok_or_else(|| CliError::NotFound(format!("no {} file matching '{spec}' on disk or in the P4k", extensions.join("/"))))?;
+    if candidates.len() > 1 && !entry.name.to_lowercase().ends_with(&needle) {
+        eprintln!("warning: '{spec}' matches {} files, using {}", candidates.len(), entry.name);
+    }
+    Ok(SourceFile { path: entry.name.clone(), data: p4k.read(entry)? })
+}
+
+/// File-name stem of a clip name (`.../nw_neutral_stand_runfast_forward.caf`
+/// is `nw_neutral_stand_runfast_forward`).
+fn clip_stem(name: &str) -> &str {
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    file.rsplit_once('.').map_or(file, |(stem, _)| stem)
+}
+
+/// Parsed `--clip` spec.
+struct ClipSpec<'a> {
+    file: &'a str,
+    filter: Option<&'a str>,
+    name: Option<&'a str>,
+}
+
+fn parse_clip_spec(spec: &str) -> Result<ClipSpec<'_>> {
+    let (file, rest) = match spec.split_once('#') {
+        Some((file, rest)) => (file, Some(rest)),
+        None => (spec, None),
+    };
+    let (filter, name) = match rest {
+        Some(rest) => match rest.split_once('=') {
+            Some((filter, name)) => (Some(filter), Some(name)),
+            None => (Some(rest), None),
+        },
+        None => (None, None),
+    };
+    let filter = filter.filter(|f| !f.is_empty());
+    let name = name.filter(|n| !n.is_empty());
+    if file.is_empty() || (name.is_some() && filter.is_none()) {
+        return Err(CliError::InvalidInput(format!("bad --clip '{spec}': expected <dba|caf>#<clip filter>[=<name>]")));
+    }
+    Ok(ClipSpec { file, filter, name })
+}
+
+/// Clips of `db` selected by `spec`, paired with their output names.
+fn select_clips<'a>(
+    db: &'a starbreaker_3d::animation::AnimationDatabase,
+    spec: &ClipSpec,
+    raw: &str,
+) -> Result<Vec<(&'a starbreaker_3d::animation::AnimationClip, String)>> {
+    let filter = spec.filter.map(str::to_lowercase);
+    let matches: Vec<_> = db
+        .clips
+        .iter()
+        .filter(|c| filter.as_ref().is_none_or(|f| c.name.to_lowercase().contains(f)))
+        .collect();
+    if matches.is_empty() {
+        return Err(CliError::NotFound(format!("--clip '{raw}' matches no clip")));
+    }
+    let Some(name) = spec.name else {
+        return Ok(matches.into_iter().map(|c| (c, clip_stem(&c.name).to_string())).collect());
+    };
+    let filter = filter.expect("a named clip spec has a filter");
+    let exact: Vec<_> = matches
+        .iter()
+        .filter(|c| {
+            let stem = clip_stem(&c.name).to_lowercase();
+            stem == filter || format!("{stem}.caf") == filter || c.name.to_lowercase().ends_with(&filter)
+        })
+        .collect();
+    let clip = match (matches.len(), exact.len()) {
+        (1, _) => matches[0],
+        (_, 1) => *exact[0],
+        _ => {
+            let names: Vec<&str> = matches.iter().take(8).map(|c| clip_stem(&c.name)).collect();
+            return Err(CliError::InvalidInput(format!(
+                "--clip '{raw}' matches {} clips ({}{}); make the filter unique",
+                matches.len(),
+                names.join(", "),
+                if matches.len() > 8 { ", ..." } else { "" },
+            )));
+        }
+    };
+    Ok(vec![(clip, name.to_string())])
+}
+
+fn animations(
+    output: PathBuf,
+    p4k_path: Option<PathBuf>,
+    skeleton_spec: String,
+    clip_specs: Vec<String>,
+    with_mesh: bool,
+    keep_root_motion: bool,
+) -> Result<()> {
+    use starbreaker_3d::animation::{parse_caf, parse_dba, sample_clip, AnimationDatabase, SampleOptions, SampledClip};
+
+    let mut p4k = None;
+    let skeleton = read_source(&skeleton_spec, &[".chr", ".skin"], &mut p4k, p4k_path.as_deref())?;
+    let bones = starbreaker_3d::skeleton::parse_skeleton(&skeleton.data)
+        .ok_or_else(|| CliError::InvalidInput(format!("no CompiledBones in {}", skeleton.path)))?;
+    eprintln!("Skeleton: {} ({} bones)", skeleton.path, bones.len());
+    let geometry = if with_mesh {
+        if !skeleton.path.to_lowercase().ends_with(".skin") {
+            return Err(CliError::InvalidInput("--mesh needs a .skin skeleton (its .skinm holds the mesh)".into()));
+        }
+        let mesh_path = format!("{}m", skeleton.path);
+        Some(read_source(&mesh_path, &[".skinm"], &mut p4k, p4k_path.as_deref())?.data)
+    } else {
+        None
+    };
+
+    let opts = SampleOptions { strip_root_translation: !keep_root_motion };
+    let mut databases: HashMap<String, (String, AnimationDatabase)> = HashMap::new();
+    let mut sampled: Vec<SampledClip> = Vec::new();
+    for raw in &clip_specs {
+        let spec = parse_clip_spec(raw)?;
+        if !databases.contains_key(spec.file) {
+            let source = read_source(spec.file, &[".dba", ".caf"], &mut p4k, p4k_path.as_deref())?;
+            let db = if source.path.to_lowercase().ends_with(".caf") {
+                let mut db = parse_caf(&source.data)?;
+                for clip in &mut db.clips {
+                    clip.name = source.path.clone();
+                }
+                db
+            } else {
+                parse_dba(&source.data)?
+            };
+            databases.insert(spec.file.to_string(), (source.path, db));
+        }
+        let (source_path, db) = &databases[spec.file];
+        for (clip, name) in select_clips(db, &spec, raw)? {
+            let stem = clip_stem(&clip.name);
+            if stem.to_lowercase().ends_with("_add") {
+                eprintln!("skip {stem}: additive clip (deltas on top of a base pose), not a standalone animation");
+                continue;
+            }
+            if sampled.iter().any(|c| c.name == name) {
+                return Err(CliError::InvalidInput(format!("two clips named '{name}'; name them with =<name>")));
+            }
+            let source = format!("{source_path}#{stem}");
+            let clip = sample_clip(clip, &bones, &name, &source, opts)
+                .ok_or_else(|| CliError::InvalidInput(format!("clip {stem} animates no bone of {}", skeleton.path)))?;
+            eprintln!(
+                "  {:<32} {:>4} frames @ {:>2} fps  {:<6} {} ({} channels, {} not in skeleton{})",
+                clip.name,
+                clip.frames,
+                clip.fps,
+                if clip.is_static { "static" } else if clip.looping { "loop" } else { "once" },
+                stem,
+                clip.matched_channels,
+                clip.unmatched_channels,
+                if clip.root_motion_removed > 0.001 {
+                    format!(", {:.2} m root motion removed", clip.root_motion_removed)
+                } else {
+                    String::new()
+                },
+            );
+            sampled.push(clip);
+        }
+    }
+    if sampled.is_empty() {
+        return Err(CliError::InvalidInput("no clips to write".into()));
+    }
+
+    let stem = clip_stem(&skeleton.path);
+    let out = starbreaker_3d::animated_skeleton_glb(&bones, geometry.as_deref(), &sampled, Some(stem))?;
+    std::fs::write(&output, &out.glb)
+        .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
+    eprintln!(
+        "Written {} bytes to {} ({} joints, {} animations{})",
+        out.glb.len(),
+        output.display(),
+        out.joint_count,
+        sampled.len(),
+        if geometry.is_some() { format!(", {} vertices", out.vertex_count) } else { String::new() },
+    );
     Ok(())
 }
 

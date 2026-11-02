@@ -25,12 +25,14 @@ mod codec;
 pub mod pose;
 pub mod caf;
 pub mod dba;
+pub mod sample;
 pub use pose::{
     apply_pose_to_skeleton, bone_name_hash, clip_final_pose, cry_xyzw_to_blender_wxyz,
     find_block_for_skeleton, read_dba_final_pose, BonePose, BoneTransforms,
 };
 pub use caf::parse_caf;
 pub use dba::parse_dba;
+pub use sample::{sample_clip, SampleOptions, SampledClip};
 pub mod serialise;
 pub mod mannequin;
 pub mod matching;

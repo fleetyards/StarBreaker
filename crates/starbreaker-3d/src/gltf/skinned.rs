@@ -19,10 +19,11 @@ use json::validation::{Checked, USize64};
 use super::{GlbBuilder, GlbOptions};
 use crate::error::Error;
 use crate::ivo::skin::BoneMap12;
-use crate::skeleton::Bone;
+use crate::animation::SampledClip;
+use crate::skeleton::{bind_local_transforms, bone_parent, bone_world_transform, Bone};
 use crate::types::Mesh;
 
-/// Result of [`write_skinned_glb`].
+/// Result of [`write_animated_skeleton_glb`].
 pub struct SkinnedGlb {
     pub glb: Vec<u8>,
     pub vertex_count: usize,
@@ -38,25 +39,11 @@ pub struct SkinnedGlb {
     pub max_truncated_weight: f32,
 }
 
-/// Bone bind-pose world transform (model space) as rotation + translation.
-fn bone_world(bone: &Bone) -> (glam::Quat, glam::Vec3) {
-    let [w, x, y, z] = bone.world_rotation;
-    (glam::Quat::from_xyzw(x, y, z, w).normalize(), glam::Vec3::from(bone.world_position))
-}
-
 /// Inverse of a rigid transform, built from its parts so the bottom row is
 /// exactly (0, 0, 0, 1) as glTF requires of inverse bind matrices.
 fn rigid_inverse((rotation, translation): (glam::Quat, glam::Vec3)) -> glam::Mat4 {
     let inverse = rotation.conjugate();
     glam::Mat4::from_rotation_translation(inverse, -(inverse * translation))
-}
-
-/// Parent index of `bones[index]`, `None` for a root or an invalid parent.
-fn bone_parent(bones: &[Bone], index: usize) -> Option<usize> {
-    bones[index]
-        .parent_index
-        .map(usize::from)
-        .filter(|&parent| parent < bones.len() && parent != index)
 }
 
 /// Normalised influences of one vertex: a joint repeated in two slots is
@@ -136,30 +123,28 @@ fn push_accessor(
     accessor
 }
 
-/// Write `mesh` as a glTF skinned mesh bound to `bones`.
-///
-/// `mesh.skin_weights` must hold a bone map for every vertex, with joint
-/// indices into `bones` (see `types::build_skinned_mesh`).
-pub fn write_skinned_glb(
-    mesh: &Mesh,
-    bones: &[Bone],
-    name: Option<&str>,
-    opts: &GlbOptions,
-) -> Result<SkinnedGlb, Error> {
-    if bones.is_empty() {
-        return Err(Error::NotRiggable("skeleton has no bones".into()));
+/// Pack `values` as a float accessor of `count` elements (no buffer view
+/// target: inverse bind matrices and animation data are not vertex data).
+fn push_f32_accessor(builder: &mut GlbBuilder, values: &[f32], count: usize, type_: json::accessor::Type) -> u32 {
+    align4(&mut builder.bin);
+    let offset = builder.bin.len();
+    for value in values {
+        builder.bin.extend_from_slice(&value.to_le_bytes());
     }
-    let Some(bone_maps) = mesh.skin_weights.as_ref() else {
-        return Err(Error::NotRiggable("mesh has no bone map stream".into()));
-    };
-    let joint_count = bones.len();
+    push_accessor(builder, offset, count, json::accessor::ComponentType::F32, type_, None)
+}
+
+/// Vertex skinning streams of a mesh, ready to attach to its primitives.
+struct VertexSkinning {
+    joints_accessor: u32,
+    weights_accessor: u32,
+    unweighted_vertices: usize,
+    out_of_range_influences: usize,
+}
+
+/// Pack `JOINTS_0`/`WEIGHTS_0` for every vertex of `mesh`.
+fn push_vertex_skinning(builder: &mut GlbBuilder, mesh: &Mesh, bone_maps: &[BoneMap12], joint_count: usize) -> VertexSkinning {
     let vertex_count = mesh.positions.len();
-
-    let mut builder = GlbBuilder::new();
-    builder.include_vertex_colors = opts.include_vertex_colors;
-    builder.include_damage = opts.include_damage;
-    let packed = builder.pack_mesh(mesh, None, None, None, name, opts.material_mode, opts.preserve_textureless_decal_primitives);
-
     // Fallback joint for unweighted vertices: their submesh's node bone.
     let mut fallback_joint = vec![0u16; vertex_count];
     for submesh in &mesh.submeshes {
@@ -211,7 +196,7 @@ pub fn write_skinned_glb(
         json::accessor::ComponentType::U16
     };
     let joints_accessor = push_accessor(
-        &mut builder,
+        builder,
         joints_offset,
         vertex_count,
         joints_component,
@@ -228,26 +213,23 @@ pub fn write_skinned_glb(
         }
     }
     let weights_accessor = push_accessor(
-        &mut builder,
+        builder,
         weights_offset,
         vertex_count,
         json::accessor::ComponentType::F32,
         json::accessor::Type::Vec4,
         Some(json::buffer::Target::ArrayBuffer),
     );
+    VertexSkinning { joints_accessor, weights_accessor, unweighted_vertices, out_of_range_influences }
+}
 
-    for primitive in &mut builder.meshes_json[packed.mesh_idx as usize].primitives {
-        primitive
-            .attributes
-            .insert(Checked::Valid(json::mesh::Semantic::Joints(0)), json::Index::new(joints_accessor));
-        primitive
-            .attributes
-            .insert(Checked::Valid(json::mesh::Semantic::Weights(0)), json::Index::new(weights_accessor));
-    }
-
-    // Joint nodes: local TRS = inverse(parent world) * world, so the chained
-    // hierarchy reproduces each bone's bind-pose world matrix.
-    let world: Vec<(glam::Quat, glam::Vec3)> = bones.iter().map(bone_world).collect();
+/// Joint nodes (local TRS = bind pose, see `skeleton::bind_local_transforms`),
+/// inverse bind matrices and the glTF skin. Returns the first joint node
+/// index (joints are contiguous, in bone order) and the root joints.
+fn push_joints(builder: &mut GlbBuilder, bones: &[Bone], name: Option<&str>) -> (u32, Vec<json::Index<json::Node>>) {
+    let joint_count = bones.len();
+    let world: Vec<(glam::Quat, glam::Vec3)> = bones.iter().map(bone_world_transform).collect();
+    let local = bind_local_transforms(bones);
     let first_joint_node = builder.nodes_json.len() as u32;
     let mut children: Vec<Vec<json::Index<json::Node>>> = vec![Vec::new(); joint_count];
     let mut roots = Vec::new();
@@ -258,16 +240,7 @@ pub fn write_skinned_glb(
         }
     }
     for (index, bone) in bones.iter().enumerate() {
-        let (rotation, translation) = match bone_parent(bones, index) {
-            Some(parent) => {
-                let parent_inverse = world[parent].0.conjugate();
-                (
-                    (parent_inverse * world[index].0).normalize(),
-                    parent_inverse * (world[index].1 - world[parent].1),
-                )
-            }
-            None => world[index],
-        };
+        let (rotation, translation) = local[index];
         let node_children = std::mem::take(&mut children[index]);
         builder.nodes_json.push(json::Node {
             name: Some(bone.name.clone()),
@@ -278,22 +251,8 @@ pub fn write_skinned_glb(
         });
     }
 
-    // inverseBindMatrices (no buffer view target: not a vertex attribute).
-    align4(&mut builder.bin);
-    let ibm_offset = builder.bin.len();
-    for &transform in &world {
-        for value in rigid_inverse(transform).to_cols_array() {
-            builder.bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    let ibm_accessor = push_accessor(
-        &mut builder,
-        ibm_offset,
-        joint_count,
-        json::accessor::ComponentType::F32,
-        json::accessor::Type::Mat4,
-        None,
-    );
+    let ibm: Vec<f32> = world.iter().flat_map(|&transform| rigid_inverse(transform).to_cols_array()).collect();
+    let ibm_accessor = push_f32_accessor(builder, &ibm, joint_count, json::accessor::Type::Mat4);
 
     builder.skins_json.push(json::Skin {
         extensions: None,
@@ -303,20 +262,172 @@ pub fn write_skinned_glb(
         name: name.map(String::from),
         skeleton: (roots.len() == 1).then(|| roots[0]),
     });
+    (first_joint_node, roots)
+}
 
-    let mesh_node = builder.nodes_json.len() as u32;
-    builder.nodes_json.push(json::Node {
-        name: name.map(String::from),
-        mesh: Some(json::Index::new(packed.mesh_idx)),
-        skin: Some(json::Index::new(0)),
-        ..Default::default()
-    });
-    builder.unwrapped_scene_nodes.push(json::Index::new(mesh_node));
+/// Bones animated by any clip, for rotation and for translation. Every clip
+/// writes a track for each of them (bind pose where it has no channel), so
+/// switching clips in a viewer that does not reset the pose leaves no
+/// residue of the previous clip.
+fn animated_bones(clips: &[SampledClip], joint_count: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut rotated = vec![false; joint_count];
+    let mut translated = vec![false; joint_count];
+    for clip in clips {
+        for (bone, _) in &clip.rotations {
+            rotated[*bone] = true;
+        }
+        for (bone, _) in &clip.translations {
+            translated[*bone] = true;
+        }
+    }
+    let collect = |flags: Vec<bool>| flags.into_iter().enumerate().filter(|(_, f)| *f).map(|(i, _)| i).collect();
+    (collect(rotated), collect(translated))
+}
+
+/// One glTF animation per clip, channels on the joint nodes.
+fn push_animations(builder: &mut GlbBuilder, bones: &[Bone], first_joint_node: u32, clips: &[SampledClip]) -> Result<(), Error> {
+    let rest = bind_local_transforms(bones);
+    let (rotated, translated) = animated_bones(clips, bones.len());
+    for clip in clips {
+        let frames = clip.frames.max(1);
+        let times: Vec<f32> = (0..frames).map(|k| k as f32 / clip.fps).collect();
+        let input = push_f32_accessor(builder, &times, frames, json::accessor::Type::Scalar);
+        builder.accessors[input as usize].min = Some(serde_json::json!([times[0]]));
+        builder.accessors[input as usize].max = Some(serde_json::json!([times[frames - 1]]));
+        let interpolation = if frames == 1 {
+            json::animation::Interpolation::Step
+        } else {
+            json::animation::Interpolation::Linear
+        };
+
+        let mut samplers = Vec::new();
+        let mut channels = Vec::new();
+        let mut push_channel = |builder: &mut GlbBuilder, bone: usize, values: Vec<f32>, type_, path| {
+            let output = push_f32_accessor(builder, &values, frames, type_);
+            channels.push(json::animation::Channel {
+                sampler: json::Index::new(samplers.len() as u32),
+                target: json::animation::Target {
+                    node: json::Index::new(first_joint_node + bone as u32),
+                    path: Checked::Valid(path),
+                    extensions: None,
+                    extras: Default::default(),
+                },
+                extensions: None,
+                extras: Default::default(),
+            });
+            samplers.push(json::animation::Sampler {
+                input: json::Index::new(input),
+                interpolation: Checked::Valid(interpolation),
+                output: json::Index::new(output),
+                extensions: None,
+                extras: Default::default(),
+            });
+        };
+
+        for &bone in &rotated {
+            let mut samples: Vec<glam::Quat> = match clip.rotations.iter().find(|(b, _)| *b == bone) {
+                Some((_, samples)) => samples.iter().map(|q| q.normalize()).collect(),
+                None => vec![rest[bone].0; frames],
+            };
+            samples.resize(frames, *samples.last().unwrap_or(&rest[bone].0));
+            for k in 1..frames {
+                if samples[k - 1].dot(samples[k]) < 0.0 {
+                    samples[k] = -samples[k];
+                }
+            }
+            let values = samples.iter().flat_map(|q| q.to_array()).collect();
+            push_channel(builder, bone, values, json::accessor::Type::Vec4, json::animation::Property::Rotation);
+        }
+        for &bone in &translated {
+            let mut samples: Vec<glam::Vec3> = match clip.translations.iter().find(|(b, _)| *b == bone) {
+                Some((_, samples)) => samples.clone(),
+                None => vec![rest[bone].1; frames],
+            };
+            samples.resize(frames, *samples.last().unwrap_or(&rest[bone].1));
+            let values = samples.iter().flat_map(|p| p.to_array()).collect();
+            push_channel(builder, bone, values, json::accessor::Type::Vec3, json::animation::Property::Translation);
+        }
+
+        let extras = serde_json::json!({
+            "source": clip.source,
+            "fps": clip.fps,
+            "frames": frames,
+            "source_frames": clip.source_frames,
+            "static": clip.is_static,
+            "looping": clip.looping,
+            "root_motion_removed_m": clip.root_motion_removed,
+        });
+        builder.animations_json.push(json::Animation {
+            name: Some(clip.name.clone()),
+            channels,
+            samplers,
+            extensions: None,
+            extras: Some(serde_json::value::RawValue::from_string(extras.to_string())?),
+        });
+    }
+    Ok(())
+}
+
+/// Write the rigged skeleton of `bones` with one glTF animation per clip,
+/// and optionally `mesh` as a skinned mesh bound to it. Without a mesh the
+/// skin is still written, so importers build an armature from the joints.
+///
+/// `mesh.skin_weights` must hold a bone map for every vertex, with joint
+/// indices into `bones` (see `types::build_skinned_mesh`).
+pub fn write_animated_skeleton_glb(
+    mesh: Option<&Mesh>,
+    bones: &[Bone],
+    clips: &[SampledClip],
+    name: Option<&str>,
+    opts: &GlbOptions,
+) -> Result<SkinnedGlb, Error> {
+    if bones.is_empty() {
+        return Err(Error::NotRiggable("skeleton has no bones".into()));
+    }
+    let joint_count = bones.len();
+
+    let mut builder = GlbBuilder::new();
+    builder.include_vertex_colors = opts.include_vertex_colors;
+    builder.include_damage = opts.include_damage;
+    let mut skinned_mesh = None;
+    let (mut unweighted_vertices, mut out_of_range_influences) = (0, 0);
+    if let Some(mesh) = mesh {
+        let Some(bone_maps) = mesh.skin_weights.as_ref() else {
+            return Err(Error::NotRiggable("mesh has no bone map stream".into()));
+        };
+        let packed = builder.pack_mesh(mesh, None, None, None, name, opts.material_mode, opts.preserve_textureless_decal_primitives);
+        let skinning = push_vertex_skinning(&mut builder, mesh, bone_maps, joint_count);
+        unweighted_vertices = skinning.unweighted_vertices;
+        out_of_range_influences = skinning.out_of_range_influences;
+        for primitive in &mut builder.meshes_json[packed.mesh_idx as usize].primitives {
+            primitive
+                .attributes
+                .insert(Checked::Valid(json::mesh::Semantic::Joints(0)), json::Index::new(skinning.joints_accessor));
+            primitive
+                .attributes
+                .insert(Checked::Valid(json::mesh::Semantic::Weights(0)), json::Index::new(skinning.weights_accessor));
+        }
+        skinned_mesh = Some(packed.mesh_idx);
+    }
+
+    let (first_joint_node, roots) = push_joints(&mut builder, bones, name);
+
+    if let Some(mesh_idx) = skinned_mesh {
+        let mesh_node = builder.nodes_json.len() as u32;
+        builder.nodes_json.push(json::Node {
+            name: name.map(String::from),
+            mesh: Some(json::Index::new(mesh_idx)),
+            skin: Some(json::Index::new(0)),
+            ..Default::default()
+        });
+        builder.unwrapped_scene_nodes.push(json::Index::new(mesh_node));
+    }
+    push_animations(&mut builder, bones, first_joint_node, clips)?;
 
     let glb = builder.finalize(roots, Vec::new(), &opts.metadata)?;
     Ok(SkinnedGlb {
         glb,
-        vertex_count,
+        vertex_count: mesh.map_or(0, |m| m.positions.len()),
         joint_count,
         unweighted_vertices,
         out_of_range_influences,
@@ -466,7 +577,7 @@ mod tests {
             // Rotated 90 degrees about Z and offset from its parent.
             bone("Spine", Some(0), [0.0, 0.2, 1.4], [half, 0.0, 0.0, half]),
         ];
-        let out = write_skinned_glb(&mesh(), &bones, Some("piece"), &opts()).unwrap();
+        let out = write_animated_skeleton_glb(Some(&mesh()), &bones, &[], Some("piece"), &opts()).unwrap();
         assert_eq!(out.vertex_count, 4);
         assert_eq!(out.joint_count, 2);
         assert_eq!(out.unweighted_vertices, 1);
@@ -517,6 +628,93 @@ mod tests {
             assert!((weights[4] - 200.0 / 255.0).abs() < 1e-6);
             assert!((weights[8] - 1.0).abs() < 1e-6);
             assert!((weights[12] - 1.0).abs() < 1e-6);
+        }
+    }
+
+    fn sampled(name: &str, frames: usize, rotations: Vec<(usize, Vec<glam::Quat>)>, translations: Vec<(usize, Vec<glam::Vec3>)>) -> SampledClip {
+        SampledClip {
+            name: name.into(),
+            source: format!("test.dba#{name}"),
+            fps: 30.0,
+            frames,
+            source_frames: frames.saturating_sub(1) as f32,
+            is_static: frames == 1,
+            looping: false,
+            rotations,
+            translations,
+            matched_channels: 1,
+            unmatched_channels: 0,
+            root_motion_removed: 0.0,
+        }
+    }
+
+    #[test]
+    fn skeleton_only_glb_carries_one_animation_per_clip_on_the_joints() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let bones = vec![
+            bone("Hips", None, [0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]),
+            bone("Spine", Some(0), [0.0, 0.2, 1.4], [half, 0.0, 0.0, half]),
+        ];
+        let pose = glam::Quat::from_rotation_x(0.5);
+        let clips = vec![
+            sampled("pose", 1, vec![(1, vec![pose])], vec![]),
+            sampled(
+                "bob",
+                3,
+                vec![],
+                vec![(0, vec![glam::Vec3::new(0.0, 0.0, 1.0), glam::Vec3::new(0.0, 0.0, 1.05), glam::Vec3::new(0.0, 0.0, 1.0)])],
+            ),
+        ];
+        let out = write_animated_skeleton_glb(None, &bones, &clips, Some("rig"), &opts()).unwrap();
+        assert_eq!(out.vertex_count, 0);
+        let (root, bin) = parse_glb(&out.glb);
+        assert!(root.get("meshes").is_none_or(|m| m.as_array().unwrap().is_empty()));
+        let joints: Vec<u64> = root["skins"][0]["joints"].as_array().unwrap().iter().map(|j| j.as_u64().unwrap()).collect();
+        let animations = root["animations"].as_array().unwrap();
+        assert_eq!(animations.len(), 2);
+        assert_eq!(animations[0]["name"], "pose");
+        assert_eq!(animations[0]["extras"]["static"], true);
+        assert_eq!(animations[1]["extras"]["source"], "test.dba#bob");
+
+        for animation in animations {
+            // Spine rotation and Hips translation in both clips: the clip
+            // without a channel holds the bind pose.
+            let channels = animation["channels"].as_array().unwrap();
+            assert_eq!(channels.len(), 2);
+            let mut paths: Vec<(u64, &str)> = channels
+                .iter()
+                .map(|c| (c["target"]["node"].as_u64().unwrap(), c["target"]["path"].as_str().unwrap()))
+                .collect();
+            paths.sort();
+            assert_eq!(paths, [(joints[0], "translation"), (joints[1], "rotation")]);
+        }
+
+        let sampler = |a: usize, path: &str| {
+            let animation = &animations[a];
+            let channel = animation["channels"].as_array().unwrap().iter().find(|c| c["target"]["path"] == path).unwrap();
+            &animation["samplers"][channel["sampler"].as_u64().unwrap() as usize]
+        };
+        let pose_rotation = sampler(0, "rotation");
+        assert_eq!(pose_rotation["interpolation"], "STEP");
+        let output = floats(&root, &bin, pose_rotation["output"].as_u64().unwrap() as usize);
+        assert!(glam::Quat::from_slice(&output).abs_diff_eq(pose, 1e-6));
+        // Hips translation in the static clip = the Hips rest translation.
+        let rest = floats(&root, &bin, sampler(0, "translation")["output"].as_u64().unwrap() as usize);
+        assert_eq!(rest, [0.0, 0.0, 1.0]);
+
+        let bob = sampler(1, "translation");
+        assert_eq!(bob["interpolation"], "LINEAR");
+        let input = bob["input"].as_u64().unwrap() as usize;
+        assert_eq!(floats(&root, &bin, input), [0.0, 1.0 / 30.0, 2.0 / 30.0]);
+        assert_eq!(root["accessors"][input]["max"][0].as_f64().unwrap() as f32, 2.0 / 30.0);
+        let bob_values = floats(&root, &bin, bob["output"].as_u64().unwrap() as usize);
+        assert!((bob_values[5] - 1.05).abs() < 1e-6);
+        // Spine rotation held at its bind local (parent Hips is unrotated).
+        let spine_rest = floats(&root, &bin, sampler(1, "rotation")["output"].as_u64().unwrap() as usize);
+        assert_eq!(spine_rest.len(), 12);
+        let spine_node = &root["nodes"][joints[1] as usize]["rotation"];
+        for k in 0..4 {
+            assert!((spine_rest[k] - spine_node[k].as_f64().unwrap() as f32).abs() < 1e-6);
         }
     }
 }
