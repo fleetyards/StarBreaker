@@ -22,9 +22,13 @@ pub fn run(
     names: Vec<String>,
     list: Option<PathBuf>,
     bodies: Vec<String>,
+    helpers: Option<String>,
     output: Option<PathBuf>,
     p4k_path: Option<PathBuf>,
 ) -> Result<()> {
+    let helper_filter: Option<Vec<String>> = helpers.map(|h| {
+        h.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
+    });
     let mut wanted = names;
     if let Some(list) = &list {
         let text = std::fs::read_to_string(list).map_err(|e| CliError::IoPath { source: e, path: list.display().to_string() })?;
@@ -66,6 +70,19 @@ pub fn run(
         entry.insert("class".into(), json!(db.resolve_string2(record.name_offset).rsplit('.').next().unwrap_or("")));
         entry.insert("type".into(), json!(item_type));
         entry.insert("sub_type".into(), json!(sub_type));
+        if let Some(filter) = &helper_filter {
+            let tags = attach.and_then(|a| a.get("Tags")).and_then(Json::as_str).unwrap_or("");
+            entry.insert("tags".into(), json!(tags));
+            let default = starbreaker_3d::worn_model_paths(&db, record, "", true).filter(|p| !p.tagged);
+            let value = match (&default, &p4k) {
+                (Some(paths), Some(p4k)) => json!({
+                    "geometry": paths.geometry,
+                    "helpers": model_helpers(p4k, &paths.geometry, filter),
+                }),
+                _ => Json::Null,
+            };
+            entry.insert("default".into(), value);
+        }
         let mut rigid = false;
         for body in &bodies {
             let tag = match body.to_lowercase().as_str() {
@@ -79,14 +96,18 @@ pub fn run(
                 Some(paths) => {
                     let kind = extension(&paths.geometry);
                     rigid |= kind != "skin";
-                    json!({
+                    let mut value = json!({
                         "geometry": paths.geometry,
                         "kind": kind,
                         "material": paths.material,
                         "tagged": paths.tagged,
                         "stored": paths.stored,
                         "in_p4k": p4k.as_ref().map(|p| in_p4k(p, &paths.geometry)),
-                    })
+                    });
+                    if let (Some(filter), Some(p4k)) = (&helper_filter, &p4k) {
+                        value["helpers"] = model_helpers(p4k, &paths.geometry, filter);
+                    }
+                    value
                 }
             };
             entry.insert(body.to_lowercase(), value);
@@ -109,6 +130,59 @@ pub fn run(
 
 fn extension(path: &str) -> String {
     Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+}
+
+/// Helper nodes (`.cga`/`.cgf` NMC nodes) or bones (`.chr`, a `.cdf`'s
+/// `.chr`, a `.skin`'s own) of a model whose lower-case name contains one of
+/// `filter`, by name: model-space `position` and `rotation` as x, y, z, w,
+/// CryEngine frame (Z up, Y forward). A read error is reported as `error`.
+fn model_helpers(p4k: &MappedP4k, geometry: &str, filter: &[String]) -> Json {
+    type Frame = (String, [f32; 4], [f32; 3]);
+    let frames = || -> Result<(String, Vec<Frame>)> {
+        let data = crate::rig_batch::read(p4k, geometry)?;
+        let bones_of = |data: &[u8]| -> Vec<Frame> {
+            starbreaker_3d::skeleton::parse_skeleton(data)
+                .unwrap_or_default()
+                .iter()
+                .map(|b| {
+                    let (r, t) = starbreaker_3d::skeleton::bone_world_transform(b);
+                    (b.name.clone(), [r.x, r.y, r.z, r.w], t.to_array())
+                })
+                .collect()
+        };
+        Ok(match extension(geometry).as_str() {
+            "cga" | "cgf" => (
+                geometry.to_string(),
+                starbreaker_3d::model_node_frames(&data)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(n, r, t)| (n, [r.x, r.y, r.z, r.w], t.to_array()))
+                    .collect(),
+            ),
+            "cdf" => match crate::rig_batch::cdf_parts(&data)?.0 {
+                Some(chr) => {
+                    let bones = bones_of(&crate::rig_batch::read(p4k, &chr)?);
+                    (chr, bones)
+                }
+                None => (geometry.to_string(), Vec::new()),
+            },
+            _ => (geometry.to_string(), bones_of(&data)),
+        })
+    };
+    match frames() {
+        Err(e) => json!({ "error": e.to_string() }),
+        Ok((source, frames)) => {
+            let mut out = serde_json::Map::new();
+            for (name, r, t) in frames {
+                let lower = name.to_lowercase();
+                if !filter.iter().any(|f| lower.contains(f.as_str())) || out.contains_key(&name) {
+                    continue;
+                }
+                out.insert(name, json!({ "position": t, "rotation": r }));
+            }
+            json!({ "source": source, "nodes": out })
+        }
+    }
 }
 
 fn in_p4k(p4k: &MappedP4k, path: &str) -> bool {

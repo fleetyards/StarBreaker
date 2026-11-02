@@ -438,6 +438,13 @@ pub enum EntityCommand {
         /// Body: male, female (repeatable)
         #[arg(long = "body", default_values_t = vec!["male".to_string(), "female".to_string()])]
         bodies: Vec<String>,
+        /// Also list the helper nodes / bones of each model whose name
+        /// contains one of these comma-separated substrings (any case), e.g.
+        /// `attach_offset,backpack_attach`: model-space position and
+        /// rotation (x, y, z, w) in the CryEngine frame, for the default
+        /// geometry (`default`) and each body's worn model. Item tags too.
+        #[arg(long)]
+        helpers: Option<String>,
         /// Write the JSON here instead of stdout
         #[arg(long, short)]
         output: Option<PathBuf>,
@@ -476,7 +483,7 @@ impl EntityCommand {
                 ..
             } => export(name, output, p4k, dump_hierarchy, opts),
             Self::Loadout { name, p4k } => loadout(name, p4k),
-            Self::Worn { names, list, bodies, output, p4k } => crate::worn::run(names, list, bodies, output, p4k),
+            Self::Worn { names, list, bodies, helpers, output, p4k } => crate::worn::run(names, list, bodies, helpers, output, p4k),
         }
     }
 }

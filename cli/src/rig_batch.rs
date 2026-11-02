@@ -59,7 +59,7 @@ pub fn run(jobs_file: PathBuf, p4k_path: Option<PathBuf>, threads: Option<usize>
 }
 
 /// P4k entry of a DataCore-style path (`Objects/...`, any case).
-fn read(p4k: &MappedP4k, path: &str) -> Result<Vec<u8>> {
+pub(crate) fn read(p4k: &MappedP4k, path: &str) -> Result<Vec<u8>> {
     let normalized = path.replace('/', "\\");
     let full = if normalized.to_lowercase().starts_with("data\\") { normalized } else { format!("Data\\{normalized}") };
     let entry = p4k.entry_case_insensitive(&full).ok_or_else(|| CliError::NotFound(format!("{full} not in the P4k")))?;
@@ -156,7 +156,7 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
 }
 
 /// The `.chr` model and CA_SKIN bindings of a character definition.
-fn cdf_parts(data: &[u8]) -> Result<(Option<String>, Vec<String>)> {
+pub(crate) fn cdf_parts(data: &[u8]) -> Result<(Option<String>, Vec<String>)> {
     let text = if starbreaker_cryxml::is_cryxmlb(data) {
         format!("{}", starbreaker_cryxml::from_bytes(data)?)
     } else {

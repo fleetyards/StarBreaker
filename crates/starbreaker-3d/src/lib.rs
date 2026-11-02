@@ -322,13 +322,31 @@ pub fn load_rigid_cga(meta: &[u8], geometry: &[u8]) -> Result<RigidModel, Error>
     let mut helpers = std::collections::HashMap::new();
     if let Some(nmc) = &nmc {
         mesh = pipeline::bake_nmc_into_mesh(mesh, Some(nmc), false);
-        for (node, world) in nmc.nodes.iter().zip(pipeline::compute_nmc_world_transforms(nmc)) {
-            let (_, rotation, translation) = world.to_scale_rotation_translation();
-            helpers.entry(node.name.to_lowercase()).or_insert((rotation.normalize(), translation));
+        for (name, rotation, translation) in nmc_frames(nmc) {
+            helpers.entry(name.to_lowercase()).or_insert((rotation, translation));
         }
     }
     mesh.skin_weights = None;
     Ok(RigidModel { mesh, helpers })
+}
+
+/// Model-space frame (rotation, translation; scale dropped) of every node
+/// of a `.cga`/`.cgf`'s NMC, composed through the parent chain, in node
+/// order with the game's names. `None` without an NMC_Full chunk.
+pub fn model_node_frames(meta: &[u8]) -> Option<Vec<(String, glam::Quat, glam::Vec3)>> {
+    let (nodes, material_indices) = nmc::parse_nmc_full(meta)?;
+    Some(nmc_frames(&nmc::NodeMeshCombo { nodes, material_indices }))
+}
+
+fn nmc_frames(nmc: &nmc::NodeMeshCombo) -> Vec<(String, glam::Quat, glam::Vec3)> {
+    nmc.nodes
+        .iter()
+        .zip(pipeline::compute_nmc_world_transforms(nmc))
+        .map(|(node, world)| {
+            let (_, rotation, translation) = world.to_scale_rotation_translation();
+            (node.name.clone(), rotation.normalize(), translation)
+        })
+        .collect()
 }
 
 /// Load the `.skinm` of a skinned model that is worn rigidly (a backpack
