@@ -321,6 +321,19 @@ pub struct GraftedBone {
     pub name: String,
     pub parent: String,
     pub ancestor: bool,
+    /// Parent-frame position correction added to the donor's local position
+    /// ([`graft_missing_bones_with_offsets`]), if one applied.
+    pub offset: Option<[f32; 3]>,
+}
+
+/// Per-bone position correction for [`graft_missing_bones_with_offsets`]:
+/// added to the donor's parent-relative position of the grafted bone named
+/// like the key (lowercase), only when it hangs under a bone named `parent`
+/// (case-insensitive), the frame the correction was measured in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraftOffset {
+    pub parent: String,
+    pub position: [f32; 3],
 }
 
 /// Copy the bones of `donor` whose name ends with `suffix` (case-insensitive,
@@ -334,6 +347,20 @@ pub struct GraftedBone {
 /// `ancestor`); a helper whose donor chain reaches the root without a bone
 /// `bones` has is skipped. Returns the bones added, in order.
 pub fn graft_missing_bones(bones: &mut Vec<Bone>, donor: &[Bone], suffix: &str) -> Vec<GraftedBone> {
+    graft_missing_bones_with_offsets(bones, donor, suffix, &std::collections::HashMap::new())
+}
+
+/// [`graft_missing_bones`], with the parent-relative position of each grafted
+/// bone that `offsets` names (lowercase bone name) moved by its correction,
+/// in the parent bone's frame, when its parent matches (e.g. the median
+/// female-minus-male shift of a helper over the female skins that have it
+/// natively); the donor's local rotation is kept.
+pub fn graft_missing_bones_with_offsets(
+    bones: &mut Vec<Bone>,
+    donor: &[Bone],
+    suffix: &str,
+    offsets: &std::collections::HashMap<String, GraftOffset>,
+) -> Vec<GraftedBone> {
     let suffix = suffix.to_lowercase();
     let mut index: std::collections::HashMap<String, usize> =
         bones.iter().enumerate().map(|(i, b)| (b.name.to_lowercase(), i)).collect();
@@ -360,11 +387,18 @@ pub fn graft_missing_bones(bones: &mut Vec<Bone>, donor: &[Bone], suffix: &str) 
             let (dpr, dpt) = bone_world_transform(&donor[donor_parent]);
             let (dr, dt) = bone_world_transform(&donor[d]);
             let local_rotation = (dpr.conjugate() * dr).normalize();
-            let local_position = dpr.conjugate() * (dt - dpt);
+            let mut local_position = dpr.conjugate() * (dt - dpt);
+            let parent_name = bones[target_parent].name.clone();
+            let offset = offsets
+                .get(&donor[d].name.to_lowercase())
+                .filter(|o| o.parent.eq_ignore_ascii_case(&parent_name))
+                .map(|o| glam::Vec3::from(o.position));
+            if let Some(offset) = offset {
+                local_position += offset;
+            }
             let (pr, pt) = bone_world_transform(&bones[target_parent]);
             let rotation = (pr * local_rotation).normalize();
             let position = pt + pr * local_position;
-            let parent_name = bones[target_parent].name.clone();
             bones.push(Bone {
                 name: donor[d].name.clone(),
                 parent_index: Some(target_parent as u16),
@@ -376,7 +410,12 @@ pub fn graft_missing_bones(bones: &mut Vec<Bone>, donor: &[Bone], suffix: &str) 
             });
             let new = bones.len() - 1;
             index.insert(donor[d].name.to_lowercase(), new);
-            added.push(GraftedBone { name: donor[d].name.clone(), parent: parent_name, ancestor: d != start });
+            added.push(GraftedBone {
+                name: donor[d].name.clone(),
+                parent: parent_name,
+                ancestor: d != start,
+                offset: offset.map(|o| o.to_array()),
+            });
             donor_parent = d;
             target_parent = new;
         }
@@ -440,5 +479,27 @@ mod graft_tests {
         // Re-deriving the locals reproduces the donor's.
         let local = bind_local_transforms(&target);
         assert!(local[3].1.abs_diff_eq(glam::Vec3::new(0.1, 0.0, 0.0), 1e-5));
+
+        // With a correction in the parent (Spine) frame; a wrong-parent entry is ignored.
+        let mut target = target[..3].to_vec();
+        let offsets = std::collections::HashMap::from([
+            (
+                "backpack_attach_1_override".to_string(),
+                GraftOffset { parent: "spine".into(), position: [0.0, -0.02, 0.01] },
+            ),
+            (
+                "wep_sidearm_attach_override".to_string(),
+                GraftOffset { parent: "Spine".into(), position: [1.0, 1.0, 1.0] },
+            ),
+        ]);
+        let added = graft_missing_bones_with_offsets(&mut target, &donor, "_override", &offsets);
+        assert_eq!(added[0].offset, Some([0.0, -0.02, 0.01]));
+        assert_eq!(added[2].offset, None);
+        let (_, t) = bone_world_transform(&target[3]);
+        assert!(t.abs_diff_eq(glam::Vec3::new(0.1, -0.02, 0.91), 1e-5), "{t:?}");
+        let local = bind_local_transforms(&target);
+        assert!(local[3].1.abs_diff_eq(glam::Vec3::new(0.1, -0.02, 0.01), 1e-5));
+        let (_, t) = bone_world_transform(&target[5]);
+        assert!(t.abs_diff_eq(glam::Vec3::new(0.3, 0.0, 0.5), 1e-5), "{t:?}");
     }
 }

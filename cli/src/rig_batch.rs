@@ -18,7 +18,11 @@
 //! item), every `*_override` helper bone of that skin the job's skin lacks is
 //! added as a weight-less joint under the bone of the same name, with the
 //! donor's parent-relative bind transform (missing donor ancestors grafted
-//! too); the report lists them as `grafted`. A rigid
+//! too); the report lists them as `grafted`. `"graft_offsets": "<file.json>"`
+//! corrects their positions: `{"bones": {"<bone>": {"parent": "<bone>",
+//! "position": [x, y, z]}}}`, a parent-frame shift added to the donor's local
+//! position of a grafted bone of that name under that parent (the grafted
+//! entry then carries `offset`). A rigid
 //! model (`.cga`/`.cgf`, or a `.cdf` whose CA_SKIN rides its own small
 //! `.chr`) is bound with weight 1 to `attach.bone` of `attach.skeleton`, its
 //! `item_offset_helper` on the bone, as the game's item port places it.
@@ -27,6 +31,7 @@
 //! under `attach.bone`, at its frame in the placed model, with its own name.
 //! One JSON line per job goes to stdout.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -96,6 +101,42 @@ fn write_output(output: &str, glb: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// `graft_offsets` file: `{"bones": {"<bone>": {"parent": "<bone>", "position": [x, y, z]}}}`
+/// (other keys are ignored).
+fn read_graft_offsets(path: &str) -> Result<HashMap<String, starbreaker_3d::skeleton::GraftOffset>> {
+    let text = std::fs::read_to_string(path).map_err(|e| CliError::IoPath { source: e, path: path.to_string() })?;
+    let root: Json = serde_json::from_str(&text)?;
+    let bones = root
+        .get("bones")
+        .and_then(Json::as_object)
+        .ok_or_else(|| CliError::InvalidInput(format!("{path}: no \"bones\" object")))?;
+    let mut out = HashMap::new();
+    for (name, entry) in bones {
+        let parent = entry.get("parent").and_then(Json::as_str);
+        let position: Option<Vec<f32>> = entry
+            .get("position")
+            .and_then(Json::as_array)
+            .map(|a| a.iter().filter_map(Json::as_f64).map(|v| v as f32).collect());
+        match (parent, position) {
+            (Some(parent), Some(p)) if p.len() == 3 => {
+                out.insert(
+                    name.to_lowercase(),
+                    starbreaker_3d::skeleton::GraftOffset {
+                        parent: parent.to_string(),
+                        position: [p[0], p[1], p[2]],
+                    },
+                );
+            }
+            _ => {
+                return Err(CliError::InvalidInput(format!(
+                    "{path}: bone {name} needs \"parent\" and a 3-number \"position\""
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
     let geometry = job.get("geometry").and_then(Json::as_str).ok_or_else(|| CliError::InvalidInput("job without geometry".into()))?;
     let output = job.get("output").and_then(Json::as_str).ok_or_else(|| CliError::InvalidInput("job without output".into()))?;
@@ -111,7 +152,12 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
         if let Some(donor_path) = donor_path {
             let donor = starbreaker_3d::skeleton::parse_skeleton(&read(p4k, donor_path)?)
                 .ok_or_else(|| CliError::InvalidInput(format!("no CompiledBones in {donor_path}")))?;
-            grafted = starbreaker_3d::skeleton::graft_missing_bones(&mut bones, &donor, "_override");
+            let offsets = match job.get("graft_offsets").and_then(Json::as_str).filter(|p| !p.is_empty()) {
+                Some(path) => read_graft_offsets(path)?,
+                None => Default::default(),
+            };
+            grafted =
+                starbreaker_3d::skeleton::graft_missing_bones_with_offsets(&mut bones, &donor, "_override", &offsets);
         }
         let rigged = starbreaker_3d::animated_skeleton_glb(&bones, Some(&skinm), &[], Some(&name))?;
         write_output(output, &rigged.glb)?;
@@ -124,9 +170,17 @@ fn run_job(p4k: &MappedP4k, job: &Json) -> Result<Json> {
         });
         if let Some(donor_path) = donor_path {
             report["graft_helpers_from"] = json!(donor_path);
+            if let Some(path) = job.get("graft_offsets").and_then(Json::as_str).filter(|p| !p.is_empty()) {
+                report["graft_offsets"] = json!(path);
+            }
             report["grafted"] = grafted
                 .iter()
-                .map(|g| json!({ "name": g.name, "parent": g.parent, "ancestor": g.ancestor }))
+                .map(|g| match g.offset {
+                    Some(offset) => {
+                        json!({ "name": g.name, "parent": g.parent, "ancestor": g.ancestor, "offset": offset })
+                    }
+                    None => json!({ "name": g.name, "parent": g.parent, "ancestor": g.ancestor }),
+                })
                 .collect();
         }
         return Ok(report);
