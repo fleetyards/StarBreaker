@@ -59,6 +59,9 @@ pub enum Error {
     #[error("export format '{0}' is not implemented yet")]
     UnsupportedExportFormat(String),
 
+    #[error("cannot rig mesh: {0}")]
+    NotRiggable(String),
+
     #[error("{0}")]
     Other(String),
 }

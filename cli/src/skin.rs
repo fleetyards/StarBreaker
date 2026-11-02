@@ -19,6 +19,11 @@ pub enum SkinCommand {
         /// Path to Data.p4k
         #[arg(long, env = "SC_DATA_P4K")]
         p4k: Option<PathBuf>,
+        /// Write a glTF skinned mesh: joints from the matching `.skin`'s
+        /// CompiledBones (game bone names, bind pose), JOINTS_0/WEIGHTS_0 on
+        /// every primitive. Pieces of one character share joints by name.
+        #[arg(long)]
+        rig: bool,
     },
     /// Inspect a .skinm/.skin/.cgfm/.chr file and print parsed metadata
     Inspect {
@@ -52,7 +57,7 @@ pub enum SkinCommand {
 impl SkinCommand {
     pub fn run(self) -> Result<()> {
         match self {
-            Self::Export { path, output, p4k } => export(path, output, p4k),
+            Self::Export { path, output, p4k, rig } => export(path, output, p4k, rig),
             Self::Inspect { path, p4k, bone_weights } => inspect(path, p4k, bone_weights),
             Self::ScanStreams { p4k } => scan_streams(p4k),
             Self::FindStream { stream_id, p4k } => find_stream(stream_id, p4k),
@@ -292,7 +297,7 @@ fn find_stream(stream_id_hex: String, p4k_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn export(search: String, output: Option<PathBuf>, p4k_path: Option<PathBuf>) -> Result<()> {
+fn export(search: String, output: Option<PathBuf>, p4k_path: Option<PathBuf>, rig: bool) -> Result<()> {
     let p4k = load_p4k(p4k_path.as_deref())?;
     let search_lower = search.to_lowercase();
 
@@ -307,7 +312,35 @@ fn export(search: String, output: Option<PathBuf>, p4k_path: Option<PathBuf>) ->
 
     eprintln!("Found: {}", entry.name);
     let data = p4k.read(entry)?;
-    let glb = starbreaker_3d::skin_to_glb(&data, None)?;
+    let glb = if rig {
+        // The CompiledBones live in the `.skin` beside the `.skinm` geometry.
+        let skeleton_name = entry
+            .name
+            .strip_suffix('m')
+            .filter(|_| entry.name.to_lowercase().ends_with(".skinm"))
+            .ok_or_else(|| CliError::NotFound(format!("--rig needs a .skinm, found {}", entry.name)))?;
+        let skeleton_entry = p4k
+            .entries()
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(skeleton_name))
+            .ok_or_else(|| CliError::NotFound(format!("no skeleton file {skeleton_name} in P4k")))?;
+        let skeleton = p4k.read(skeleton_entry)?;
+        let stem = skeleton_name.rsplit(['/', '\\']).next().unwrap_or("skin");
+        let stem = stem.rsplit_once('.').map_or(stem, |(base, _)| base);
+        let rigged = starbreaker_3d::skin_to_rigged_glb(&data, &skeleton, Some(stem))?;
+        eprintln!(
+            "Rigged: {} vertices, {} joints, {} unweighted vertices, {} out-of-range influences, {} vertices cut to 4 influences (max weight lost {:.3})",
+            rigged.vertex_count,
+            rigged.joint_count,
+            rigged.unweighted_vertices,
+            rigged.out_of_range_influences,
+            rigged.truncated_vertices,
+            rigged.max_truncated_weight,
+        );
+        rigged.glb
+    } else {
+        starbreaker_3d::skin_to_glb(&data, None)?
+    };
 
     let output = output.unwrap_or_else(|| {
         let stem = entry.name.rsplit(['/', '\\']).next().unwrap_or("output");

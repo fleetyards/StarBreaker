@@ -326,6 +326,23 @@ pub fn build_mesh(skin: &SkinMesh, materials: &[MaterialName]) -> Mesh {
 /// for model-bbox space. The scaling bbox is expanded for GPU skinning across
 /// NMC nodes and gives wrong vertex positions for placement.
 pub fn build_mesh_with_bbox(skin: &SkinMesh, materials: &[MaterialName], use_model_bbox: bool) -> Mesh {
+    build_mesh_impl(skin, materials, use_model_bbox, true)
+}
+
+/// Build a mesh for glTF skinning: submeshes stay whole (no per-joint rigid
+/// split) and `skin_weights` holds the authored bone map of every vertex,
+/// rigid or soft, indexed by the `.skin`'s own bone list. Eight-influence
+/// IVOBONEMAP32 maps (character bodies) keep their four strongest joints.
+pub fn build_skinned_mesh(skin: &SkinMesh, materials: &[MaterialName]) -> Mesh {
+    build_mesh_impl(skin, materials, false, false)
+}
+
+fn build_mesh_impl(
+    skin: &SkinMesh,
+    materials: &[MaterialName],
+    use_model_bbox: bool,
+    split_rigid: bool,
+) -> Mesh {
     let (dequant_min, dequant_max) = if use_model_bbox {
         (&skin.info.model_min, &skin.info.model_max)
     } else {
@@ -389,18 +406,29 @@ pub fn build_mesh_with_bbox(skin: &SkinMesh, materials: &[MaterialName], use_mod
         }
     }
 
-    let (submeshes, indices, soft_skinned) = split_rigid_weighted_submeshes(
-        &submeshes,
-        &indices,
-        skin.streams.bone_maps.as_deref(),
-    );
-    let skin_weights = soft_skin_weights(
-        &submeshes,
-        &indices,
-        &soft_skinned,
-        skin.streams.bone_maps.as_deref(),
-        positions.len(),
-    );
+    let (submeshes, indices, skin_weights) = if split_rigid {
+        let (submeshes, indices, soft_skinned) = split_rigid_weighted_submeshes(
+            &submeshes,
+            &indices,
+            skin.streams.bone_maps.as_deref(),
+        );
+        let skin_weights = soft_skin_weights(
+            &submeshes,
+            &indices,
+            &soft_skinned,
+            skin.streams.bone_maps.as_deref(),
+            positions.len(),
+        );
+        (submeshes, indices, skin_weights)
+    } else {
+        let weights = skin.streams.bone_maps.clone().or_else(|| {
+            skin.streams
+                .bone_maps8
+                .as_ref()
+                .map(|maps| maps.iter().map(|map| map.strongest_four().0).collect())
+        });
+        (submeshes, indices, weights)
+    };
 
     // Decode normals and tangents from stream data.
     // Priority for normals:
@@ -773,6 +801,7 @@ mod tests {
                 secondary_uvs: Some(vec![[0x3800, 0x0000], [0x0000, 0x3800], [0x3C00, 0x0000]]),
                 indices: vec![0, 1, 2],
                 bone_maps: None,
+                bone_maps8: None,
                 colors: None,
                 tangents: None,
                 normals: None,
@@ -855,6 +884,7 @@ mod tests {
                     BoneMap12 { joint_indices: [3, 0, 0, 0], weights: [255, 0, 0, 0] },
                     BoneMap12 { joint_indices: [3, 0, 0, 0], weights: [255, 0, 0, 0] },
                 ]),
+                bone_maps8: None,
                 colors: None,
                 tangents: None,
                 normals: None,
@@ -926,6 +956,7 @@ mod tests {
                     BoneMap12 { joint_indices: [7, 0, 0, 0], weights: [255, 0, 0, 0] },
                     BoneMap12 { joint_indices: [7, 0, 0, 0], weights: [255, 0, 0, 0] },
                 ]),
+                bone_maps8: None,
                 colors: None,
                 tangents: None,
                 normals: None,

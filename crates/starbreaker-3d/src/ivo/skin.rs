@@ -64,6 +64,15 @@ struct RawBoneMap12 {
     weights: [u8; 4],
 }
 
+/// IVOBONEMAP32 entry (24 bytes): eight u16 joints, eight u8 weights
+/// summing to 255. Character bodies use it.
+#[derive(Clone, Copy, FromBytes, KnownLayout, Immutable)]
+#[repr(C, packed)]
+struct RawBoneMap24 {
+    joint_indices: [u16; 8],
+    weights: [u8; 8],
+}
+
 const _: () = {
     assert!(size_of::<RawMeshInfo>() == 76);
     assert!(size_of::<RawSubMeshDescriptor>() == 48);
@@ -138,9 +147,44 @@ pub struct DataStreams {
     pub secondary_uvs: Option<Vec<[u16; 2]>>,
     pub indices: Vec<u32>,
     pub bone_maps: Option<Vec<BoneMap12>>,
+    /// Eight-influence IVOBONEMAP32 maps. Kept apart from `bone_maps` so the
+    /// rigid-split mesh path (which only reads `bone_maps`) is unchanged;
+    /// only the skinned glTF export reads them.
+    pub bone_maps8: Option<Vec<BoneMap24>>,
     pub colors: Option<Vec<[u8; 4]>>,
     pub tangents: Option<TangentData>,
     pub normals: Option<NormalData>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BoneMap24 {
+    pub joint_indices: [u16; 8],
+    pub weights: [u8; 8],
+}
+
+impl BoneMap24 {
+    /// The four strongest influences (a joint named in several slots summed
+    /// first), and the weight (0..=255) of the dropped ones.
+    pub fn strongest_four(self) -> (BoneMap12, u16) {
+        let mut summed: Vec<(u16, u16)> = Vec::with_capacity(8);
+        for (&joint, &weight) in self.joint_indices.iter().zip(&self.weights) {
+            if weight == 0 {
+                continue;
+            }
+            match summed.iter_mut().find(|(existing, _)| *existing == joint) {
+                Some((_, total)) => *total += u16::from(weight),
+                None => summed.push((joint, u16::from(weight))),
+            }
+        }
+        summed.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut map = BoneMap12 { joint_indices: [0; 4], weights: [0; 4] };
+        for (slot, (joint, weight)) in summed.iter().take(4).enumerate() {
+            map.joint_indices[slot] = *joint;
+            map.weights[slot] = (*weight).min(255) as u8;
+        }
+        let dropped = summed.iter().skip(4).map(|(_, weight)| weight).sum();
+        (map, dropped)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -300,6 +344,7 @@ impl SkinMesh {
         let mut secondary_uvs: Option<Vec<[u16; 2]>> = None;
         let mut indices: Option<Vec<u32>> = None;
         let mut bone_maps: Option<Vec<BoneMap12>> = None;
+        let mut bone_maps8: Option<Vec<BoneMap24>> = None;
         let mut colors: Option<Vec<[u8; 4]>> = None;
         let mut tangents: Option<TangentData> = None;
         let mut normals: Option<NormalData> = None;
@@ -431,6 +476,17 @@ impl SkinMesh {
                         reader.advance(element_size as usize * num_verts)?;
                     }
                 }
+                stream_type::IVOBONEMAP32 if element_size == 24 => {
+                    let raw = reader.read_slice::<RawBoneMap24>(num_verts)?;
+                    bone_maps8 = Some(
+                        raw.iter()
+                            .map(|entry| BoneMap24 {
+                                joint_indices: entry.joint_indices,
+                                weights: entry.weights,
+                            })
+                            .collect(),
+                    );
+                }
                 _ => {
                     let count = num_verts;
                     let skip_bytes = element_size as usize * count;
@@ -463,6 +519,7 @@ impl SkinMesh {
                 chunk_type: stream_type::IVOINDICES,
             })?,
             bone_maps,
+            bone_maps8,
             colors,
             tangents,
             normals,

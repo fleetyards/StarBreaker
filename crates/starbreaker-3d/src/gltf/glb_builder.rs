@@ -89,6 +89,11 @@ pub(crate) struct GlbBuilder {
     pub samplers_json: Vec<json::texture::Sampler>,
     pub meshes_json: Vec<json::Mesh>,
     pub nodes_json: Vec<json::Node>,
+    pub skins_json: Vec<json::Skin>,
+    /// Scene roots emitted beside (not under) the `CryEngine_Z_up` wrapper.
+    /// A skinned mesh node lives here: glTF ignores its parent transforms,
+    /// and three.js would apply them twice through the bind matrix.
+    pub unwrapped_scene_nodes: Vec<json::Index<json::Node>>,
     tex_cache: TexCache,
     tex_json_dedup: HashMap<TextureRegion, u32>,
     mat_dedup: HashMap<MaterialIdentity, u32>,
@@ -161,6 +166,8 @@ impl GlbBuilder {
             samplers_json: Vec::new(),
             meshes_json: Vec::new(),
             nodes_json: Vec::new(),
+            skins_json: Vec::new(),
+            unwrapped_scene_nodes: Vec::new(),
             tex_cache: HashMap::new(),
             tex_json_dedup: HashMap::new(),
             mat_dedup: HashMap::new(),
@@ -1272,8 +1279,10 @@ impl GlbBuilder {
             ..Default::default()
         });
 
+        let mut scene_roots = std::mem::take(&mut self.unwrapped_scene_nodes);
+        scene_roots.push(json::Index::new(coord_root_idx));
         let scenes_json = vec![json::Scene {
-            nodes: vec![json::Index::new(coord_root_idx)],
+            nodes: scene_roots,
             name: None,
             extensions: None,
             extras: Default::default(),
@@ -1388,6 +1397,7 @@ impl GlbBuilder {
             textures: self.textures_json,
             samplers: self.samplers_json,
             nodes: self.nodes_json,
+            skins: self.skins_json,
             scenes: scenes_json,
             scene: Some(json::Index::new(0)),
             extensions_used,

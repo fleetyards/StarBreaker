@@ -25,6 +25,7 @@ pub use pipeline::{
     resolve_loadout_meshes, socpaks_to_glb,
 };
 pub use types::Mesh;
+pub use gltf::SkinnedGlb;
 pub use validation::{ValidationReport, validate_decomposed_export};
 
 use starbreaker_chunks::ChunkFile;
@@ -64,6 +65,70 @@ pub(crate) fn parse_skin_with_options(data: &[u8], use_model_bbox: bool) -> Resu
         .collect::<Result<_, _>>()?;
 
     Ok(types::build_mesh_with_bbox(&skin_mesh, &materials, use_model_bbox))
+}
+
+/// Convert a character `.skinm` (geometry) into a glTF skinned GLB bound to
+/// the bones of its `.skin` (CompiledBones). Joint nodes carry the game bone
+/// names and the bind pose, so body and armour pieces exported this way share
+/// one skeleton by bone name. `name` labels the mesh, node and skin.
+pub fn skin_to_rigged_glb(geometry: &[u8], skeleton: &[u8], name: Option<&str>) -> Result<SkinnedGlb, Error> {
+    let chunk_file = ChunkFile::from_bytes(geometry)?;
+    let ivo = match &chunk_file {
+        ChunkFile::Ivo(ivo) => ivo,
+        ChunkFile::CrCh(_) => return Err(Error::UnsupportedFormat),
+    };
+    let skin_entry = ivo
+        .chunks()
+        .iter()
+        .find(|c| c.chunk_type == starbreaker_chunks::known_types::ivo::IVO_SKIN2)
+        .ok_or(Error::MissingChunk {
+            chunk_type: starbreaker_chunks::known_types::ivo::IVO_SKIN2,
+        })?;
+    let skin_mesh = ivo::skin::SkinMesh::read(ivo.chunk_data(skin_entry))?;
+    let materials: Vec<ivo::material::MaterialName> = ivo
+        .chunks()
+        .iter()
+        .filter(|c| c.chunk_type == starbreaker_chunks::known_types::ivo::MTL_NAME_IVO320)
+        .map(|entry| ivo::material::MaterialName::read(ivo.chunk_data(entry)))
+        .collect::<Result<_, _>>()?;
+    let mesh = types::build_skinned_mesh(&skin_mesh, &materials);
+    let bones = skeleton::parse_skeleton(skeleton)
+        .ok_or_else(|| Error::NotRiggable("no CompiledBones chunk in the skeleton file".into()))?;
+    let mut out = gltf::write_skinned_glb(&mesh, &bones, name, &bundled_glb_options())?;
+    if skin_mesh.streams.bone_maps.is_none() {
+        for map in skin_mesh.streams.bone_maps8.iter().flatten() {
+            let (_, dropped) = map.strongest_four();
+            if dropped > 0 {
+                out.truncated_vertices += 1;
+                out.max_truncated_weight = out.max_truncated_weight.max(f32::from(dropped) / 255.0);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn bundled_glb_options() -> gltf::GlbOptions {
+    gltf::GlbOptions {
+        material_mode: pipeline::MaterialMode::None,
+        preserve_textureless_decal_primitives: false,
+        include_vertex_colors: true,
+        include_damage: true,
+        metadata: gltf::GlbMetadata {
+            entity_name: None,
+            geometry_path: None,
+            material_path: None,
+            export_options: gltf::ExportOptionsMetadata {
+                kind: "Bundled".to_string(),
+                material_mode: "None".to_string(),
+                format: "Glb".to_string(),
+                lod_level: 0,
+                texture_mip: 0,
+                include_attachments: false,
+                include_interior: false,
+            },
+        },
+        fallback_palette: None,
+    }
 }
 
 /// Parse a `.skin`/`.cgf` IVO file and convert to GLB in one step.
