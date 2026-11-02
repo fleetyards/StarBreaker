@@ -422,6 +422,29 @@ pub enum EntityCommand {
         #[command(flatten)]
         opts: ExportOpts,
     },
+    /// Print the worn model of items as JSON: per body the file the
+    /// character wears (the Male/Female SubGeometry's own `.skin`, else the
+    /// default geometry), and for rigid models (backpacks) the core item port
+    /// and bone they hang on. One process for any number of items.
+    ///
+    /// Example: `entity worn --list keys.txt --body male --body female -o worn.json`
+    Worn {
+        /// Entity class names (exact, case-insensitive)
+        names: Vec<String>,
+        /// File with one class per line (the last word of a line counts, so
+        /// `item_models.py --dry-run` output works; `#` starts a comment)
+        #[arg(long)]
+        list: Option<PathBuf>,
+        /// Body: male, female (repeatable)
+        #[arg(long = "body", default_values_t = vec!["male".to_string(), "female".to_string()])]
+        bodies: Vec<String>,
+        /// Write the JSON here instead of stdout
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Path to Data.p4k
+        #[arg(long, env = "SC_DATA_P4K")]
+        p4k: Option<PathBuf>,
+    },
     /// Print entity loadout tree
     Loadout {
         /// Entity name (substring, case-insensitive)
@@ -453,6 +476,7 @@ impl EntityCommand {
                 ..
             } => export(name, output, p4k, dump_hierarchy, opts),
             Self::Loadout { name, p4k } => loadout(name, p4k),
+            Self::Worn { names, list, bodies, output, p4k } => crate::worn::run(names, list, bodies, output, p4k),
         }
     }
 }

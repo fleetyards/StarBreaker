@@ -22,7 +22,7 @@ pub use pipeline::{
     ExportedFileKind, MaterialMode,
     assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress, export_geometry_decomposed,
     dump_hierarchy, load_invisible_ports, query_animation_controller_source,
-    resolve_loadout_meshes, socpaks_to_glb,
+    resolve_loadout_meshes, socpaks_to_glb, worn_model_paths, WornModelPaths,
 };
 pub use types::Mesh;
 pub use gltf::SkinnedGlb;
@@ -304,6 +304,134 @@ pub fn pieces_on_skeleton_glb(
     Ok(SkeletonRiggedGlb { glb, pieces: bindings })
 }
 
+/// A rigid model in its own model space, for [`rigid_on_bone_glb`].
+pub struct RigidModel {
+    pub mesh: types::Mesh,
+    /// Model-space frames of the model's helper nodes / bones by lower-case
+    /// name (`backpack_attach_1_loc`, ...), rotation and translation.
+    pub helpers: std::collections::HashMap<String, (glam::Quat, glam::Vec3)>,
+}
+
+/// Load a `.cga`/`.cgf` model: `geometry` is its `.cgam`/`.cgfm`, `meta` the
+/// `.cga`/`.cgf` with the node tree. Node transforms are baked into the
+/// vertices (composed through the parent chain); every NMC node is listed in
+/// `helpers` by its model-space frame.
+pub fn load_rigid_cga(meta: &[u8], geometry: &[u8]) -> Result<RigidModel, Error> {
+    let nmc = nmc::parse_nmc_full(meta).map(|(nodes, material_indices)| nmc::NodeMeshCombo { nodes, material_indices });
+    let mut mesh = parse_skin(geometry)?;
+    let mut helpers = std::collections::HashMap::new();
+    if let Some(nmc) = &nmc {
+        mesh = pipeline::bake_nmc_into_mesh(mesh, Some(nmc), false);
+        for (node, world) in nmc.nodes.iter().zip(pipeline::compute_nmc_world_transforms(nmc)) {
+            let (_, rotation, translation) = world.to_scale_rotation_translation();
+            helpers.entry(node.name.to_lowercase()).or_insert((rotation.normalize(), translation));
+        }
+    }
+    mesh.skin_weights = None;
+    Ok(RigidModel { mesh, helpers })
+}
+
+/// Load the `.skinm` of a skinned model that is worn rigidly (a backpack
+/// CDF's CA_SKIN on its own small `.chr`): bind-pose model space, its own
+/// bone weights dropped. `bones` (the `.chr`'s) are listed in `helpers`.
+pub fn load_rigid_skin(geometry: &[u8], bones: &[skeleton::Bone]) -> Result<RigidModel, Error> {
+    let (skin_mesh, materials) = read_skin_geometry(geometry)?;
+    let mut mesh = types::build_skinned_mesh(&skin_mesh, &materials);
+    mesh.skin_weights = None;
+    let helpers = bones.iter().map(|b| (b.name.to_lowercase(), skeleton::bone_world_transform(b))).collect();
+    Ok(RigidModel { mesh, helpers })
+}
+
+/// Result of [`rigid_on_bone_glb`].
+pub struct RigidGlb {
+    pub glb: SkinnedGlb,
+    /// The joints written: the attach bone and its ancestors, root first.
+    pub joints: Vec<String>,
+    /// Whether the offset helper was found in the model (else the model
+    /// origin sits on the bone).
+    pub helper_found: bool,
+    /// Bind-pose world position of the attach bone (CryEngine Z-up, m).
+    pub bone_position: [f32; 3],
+}
+
+/// Write rigid `models` as a glTF skin bound with weight 1 to `bone` of
+/// `skeleton` (a core `.skin`, whose `backpack_attach_1_override` carries the
+/// backpack). Placed like the game's item port: the model's `offset_helper`
+/// frame (`backpack_attach_1_loc`) lands on the bone frame, so
+/// vertex = bone_bind * inverse(helper) * model vertex. The joints are the
+/// bone's ancestor chain from the skeleton root with the skeleton's bind
+/// pose and names, so a viewer that drives joints by name from the
+/// character (or grafts the bone from the worn core) moves it with the body.
+pub fn rigid_on_bone_glb(
+    models: &[RigidModel],
+    skeleton_bones: &[skeleton::Bone],
+    bone: &str,
+    offset_helper: Option<&str>,
+    name: Option<&str>,
+) -> Result<RigidGlb, Error> {
+    let target = skeleton_bones
+        .iter()
+        .position(|b| b.name.eq_ignore_ascii_case(bone))
+        .ok_or_else(|| Error::NotRiggable(format!("attach bone {bone} not in the skeleton")))?;
+    // Ancestor chain, root first.
+    let mut chain = vec![target];
+    while let Some(parent) = skeleton::bone_parent(skeleton_bones, *chain.last().unwrap()) {
+        chain.push(parent);
+    }
+    chain.reverse();
+    let bones: Vec<skeleton::Bone> = chain
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| skeleton::Bone {
+            parent_index: (k > 0).then(|| (k - 1) as u16),
+            ..skeleton_bones[i].clone()
+        })
+        .collect();
+    let joint = (bones.len() - 1) as u16;
+    let (bone_rotation, bone_position) = skeleton::bone_world_transform(&skeleton_bones[target]);
+    let bone_world = glam::Mat4::from_rotation_translation(bone_rotation, bone_position);
+
+    let mut helper_found = offset_helper.is_none();
+    let mut meshes = Vec::with_capacity(models.len());
+    for model in models {
+        let helper = offset_helper.and_then(|h| model.helpers.get(&h.to_lowercase()));
+        helper_found |= helper.is_some();
+        let helper = helper.map_or(glam::Mat4::IDENTITY, |&(r, t)| glam::Mat4::from_rotation_translation(r, t));
+        let place = bone_world * helper.inverse();
+        let mut mesh = model.mesh.clone();
+        for p in &mut mesh.positions {
+            *p = place.transform_point3(glam::Vec3::from(*p)).to_array();
+        }
+        if let Some(normals) = mesh.normals.as_mut() {
+            for n in normals {
+                *n = place.transform_vector3(glam::Vec3::from(*n)).normalize_or_zero().to_array();
+            }
+        }
+        if let Some(tangents) = mesh.tangents.as_mut() {
+            for t in tangents {
+                let v = place.transform_vector3(glam::Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
+                *t = [v.x, v.y, v.z, t[3]];
+            }
+        }
+        for submesh in &mut mesh.submeshes {
+            submesh.node_parent_index = joint;
+        }
+        mesh.skin_weights = Some(vec![
+            ivo::skin::BoneMap12 { joint_indices: [joint, 0, 0, 0], weights: [255, 0, 0, 0] };
+            mesh.positions.len()
+        ]);
+        meshes.push(mesh);
+    }
+    let named: Vec<(&types::Mesh, Option<&str>)> = meshes.iter().map(|m| (m, name)).collect();
+    let glb = gltf::write_animated_skeleton_glb(&named, &bones, &[], name, &bundled_glb_options())?;
+    Ok(RigidGlb {
+        glb,
+        joints: bones.iter().map(|b| b.name.clone()).collect(),
+        helper_found,
+        bone_position: bone_position.to_array(),
+    })
+}
+
 fn bundled_glb_options() -> gltf::GlbOptions {
     gltf::GlbOptions {
         material_mode: pipeline::MaterialMode::None,
@@ -376,4 +504,85 @@ pub fn skin_to_glb(data: &[u8], metadata: Option<&[u8]>) -> Result<Vec<u8>, Erro
             fallback_palette: None,
         },
     )
+}
+
+#[cfg(test)]
+mod rigid_tests {
+    use super::*;
+
+    fn bone(name: &str, parent: Option<u16>, position: [f32; 3], rotation_wxyz: [f32; 4]) -> skeleton::Bone {
+        skeleton::Bone {
+            name: name.into(),
+            parent_index: parent,
+            object_node_index: None,
+            local_position: [0.0; 3],
+            local_rotation: [1.0, 0.0, 0.0, 0.0],
+            world_position: position,
+            world_rotation: rotation_wxyz,
+        }
+    }
+
+    #[test]
+    fn rigid_model_lands_on_the_bone_through_its_offset_helper() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let skeleton = vec![
+            bone("World", None, [0.0; 3], [1.0, 0.0, 0.0, 0.0]),
+            bone("Spine", Some(0), [0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]),
+            bone("LeftArm", Some(1), [0.3, 0.0, 1.4], [1.0, 0.0, 0.0, 0.0]),
+            // 90 degrees about Z, behind the spine.
+            bone("backpack_attach_1_override", Some(1), [0.0, -0.2, 1.5], [half, 0.0, 0.0, half]),
+        ];
+        let mesh = types::Mesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.1]],
+            indices: vec![0, 1, 2],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![types::SubMesh {
+                material_name: None,
+                material_id: 0,
+                source_material_id: Some(0),
+                first_index: 0,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            }],
+            model_min: [0.0; 3],
+            model_max: [1.0, 0.0, 0.1],
+            scaling_min: [0.0; 3],
+            scaling_max: [1.0, 0.0, 0.1],
+            skin_weights: None,
+        };
+        // The helper sits 0.1 m up in the model: that point goes onto the bone.
+        let helpers = [("backpack_attach_1_loc".to_string(), (glam::Quat::IDENTITY, glam::Vec3::new(0.0, 0.0, 0.1)))].into();
+        let model = RigidModel { mesh, helpers };
+        let out = rigid_on_bone_glb(&[model], &skeleton, "backpack_attach_1_override", Some("backpack_attach_1_loc"), Some("bp")).unwrap();
+        assert_eq!(out.joints, ["World", "Spine", "backpack_attach_1_override"]);
+        assert!(out.helper_found);
+        assert_eq!(out.glb.vertex_count, 3);
+
+        // Re-derive the placed vertices from the GLB's position accessor.
+        let glb = &out.glb.glb;
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let root: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len]).unwrap();
+        let bin = &glb[20 + json_len + 8..];
+        let prim = &root["meshes"][0]["primitives"][0];
+        let acc = &root["accessors"][prim["attributes"]["POSITION"].as_u64().unwrap() as usize];
+        let view = &root["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+        let off = view["byteOffset"].as_u64().unwrap_or(0) as usize + acc["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let f = |i: usize| f32::from_le_bytes(bin[off + 4 * i..off + 4 * i + 4].try_into().unwrap());
+        // Helper point -> bone origin; model +X -> bone +X = world +Y.
+        let p2 = glam::Vec3::new(f(6), f(7), f(8));
+        let p1 = glam::Vec3::new(f(3), f(4), f(5));
+        let p0 = glam::Vec3::new(f(0), f(1), f(2));
+        assert!(p2.abs_diff_eq(glam::Vec3::new(0.0, -0.2, 1.5), 1e-5), "{p2:?}");
+        assert!(p0.abs_diff_eq(glam::Vec3::new(0.0, -0.2, 1.4), 1e-5), "{p0:?}");
+        assert!((p1 - p0).abs_diff_eq(glam::Vec3::new(0.0, 1.0, 0.0), 1e-5), "{p1:?}");
+        // Every vertex weighted fully to the attach joint (index 2).
+        let joints = &root["accessors"][prim["attributes"]["JOINTS_0"].as_u64().unwrap() as usize];
+        assert_eq!(joints["count"], 3);
+    }
 }

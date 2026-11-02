@@ -77,6 +77,23 @@ pub enum SkinCommand {
         #[arg(long)]
         keep_root_motion: bool,
     },
+    /// Write many rigged GLBs in one process from a jobs JSON file
+    /// (`{"jobs": [{"id", "output", "geometry", "attach"?}]}`): a worn
+    /// `.skin` is rigged on its own bones like `export --rig`; a rigid model
+    /// (`.cga`/`.cgf`/`.cdf`, e.g. a backpack) is bound with weight 1 to
+    /// `attach.bone` of the `attach.skeleton` `.skin` (a core), its
+    /// `attach.item_offset_helper` node placed on the bone. One JSON report
+    /// line per job on stdout. Paths are DataCore paths (`Objects/...`).
+    RigBatch {
+        /// Jobs JSON file
+        jobs: PathBuf,
+        /// Path to Data.p4k
+        #[arg(long, env = "SC_DATA_P4K")]
+        p4k: Option<PathBuf>,
+        /// Worker threads (default: all cores)
+        #[arg(long)]
+        threads: Option<usize>,
+    },
     /// Inspect a .skinm/.skin/.cgfm/.chr file and print parsed metadata
     Inspect {
         /// P4k path substring (case-insensitive)
@@ -116,6 +133,7 @@ impl SkinCommand {
             Self::Animations { output, p4k, skeleton, clips, mesh, keep_root_motion } => {
                 animations(output, p4k, skeleton, clips, mesh, keep_root_motion)
             }
+            Self::RigBatch { jobs, p4k, threads } => crate::rig_batch::run(jobs, p4k, threads),
             Self::Inspect { path, p4k, bone_weights } => inspect(path, p4k, bone_weights),
             Self::ScanStreams { p4k } => scan_streams(p4k),
             Self::FindStream { stream_id, p4k } => find_stream(stream_id, p4k),

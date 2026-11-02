@@ -581,6 +581,66 @@ pub(crate) fn worn_subgeometry(db: &Database, record: &Record, tag: &str) -> Opt
     tagged_subgeometry(db, record, tag, true)
 }
 
+/// Where an item's worn model comes from, for `entity worn`.
+#[derive(Debug, Clone)]
+pub struct WornModelPaths {
+    /// The model the character wears: the tagged SubGeometry's own file (a
+    /// `.skin` bound to the character skeleton for armour), or the entity's
+    /// default geometry when no SubGeometry carries the tag.
+    pub geometry: String,
+    /// The tagged entry's material, else the default one; may be empty.
+    pub material: String,
+    /// `true` when a SubGeometry carries the tag, `false` for the default.
+    pub tagged: bool,
+    /// The assembled inventory prop under the tagged entry
+    /// (`inventoryStoredEntity`), which `entity export --worn` prefers.
+    pub stored: Option<String>,
+}
+
+/// The worn model of `record` for the body `tag` (`Male` / `Female`), as
+/// the game wears it: unlike [`worn_subgeometry`] the tagged entry's own
+/// file, not its `inventoryStoredEntity` prop. With `fallback_default`, an
+/// item without such an entry (most backpacks) reports its default geometry.
+/// `None` when neither exists or the tagged entry names no file.
+pub fn worn_model_paths(db: &Database, record: &Record, tag: &str, fallback_default: bool) -> Option<WornModelPaths> {
+    let compiled = db.compile_path::<Value>(record.struct_id(), "Components[SGeometryResourceParams]").ok()?;
+    let components = db.query::<Value>(&compiled, record).unwrap_or_default();
+    let file_of = |entry: &Value, field: &str| -> Option<String> {
+        get_value_field(entry, "Geometry")
+            .and_then(|g| get_value_field(g, field))
+            .and_then(|g| get_value_string(g, "path"))
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+    };
+    let has_tag = |entry: &Value, wanted: &str| {
+        get_value_string(entry, "Tags").unwrap_or("").split_whitespace().any(|t| t.eq_ignore_ascii_case(wanted))
+    };
+    let mut default = None;
+    for component in &components {
+        let Some(root) = get_value_field(component, "Geometry") else { continue };
+        if default.is_none() {
+            default = file_of(root, "Geometry").map(|geometry| WornModelPaths {
+                geometry,
+                material: file_of(root, "Material").unwrap_or_default(),
+                tagged: false,
+                stored: None,
+            });
+        }
+        let Some(subs) = get_value_array(root, "SubGeometry") else { continue };
+        let Some(sub) = subs.iter().find(|sub| has_tag(sub, tag)) else { continue };
+        let geometry = file_of(sub, "Geometry")?;
+        let stored = get_value_array(sub, "SubGeometry")
+            .and_then(|children| children.iter().find(|c| has_tag(c, "inventoryStoredEntity")))
+            .and_then(|child| file_of(child, "Geometry"));
+        let material = file_of(sub, "Material")
+            .or_else(|| file_of(root, "Material"))
+            .or_else(|| subs.iter().find_map(|other| file_of(other, "Material")))
+            .unwrap_or_default();
+        return Some(WornModelPaths { geometry, material, tagged: true, stored });
+    }
+    if fallback_default { default } else { None }
+}
+
 /// The SubGeometry tagged `tag`; `sibling_material` lets an entry without
 /// a material borrow a sibling's (worn armour: the Morozov-SH core's male
 /// entry names none). Paint variants must not: the LH86's palette-only

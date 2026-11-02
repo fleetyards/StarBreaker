@@ -9,9 +9,11 @@ mod error;
 mod glb;
 mod nmc;
 mod p4k;
+mod rig_batch;
 mod skin;
 mod socpak;
 mod wwise;
+mod worn;
 
 use clap::{Parser, Subcommand};
 
