@@ -1185,6 +1185,9 @@ fn parse_light_group(
     base_scale: &[f64; 3],
 ) -> Vec<LightInfo> {
     let mut lights = Vec::new();
+    // Lights the group lists, baked in or independent, whether or not they
+    // are exported (inactive ones are skipped).
+    let mut declared_lights = 0usize;
 
     // EntityComponentLightGroup > BakedInLights > Light[]
     // Also check direct children (PropertiesDataCore > EntityComponentLightGroup)
@@ -1206,6 +1209,16 @@ fn parse_light_group(
         };
 
         for baked in xml.node_children(lg_node) {
+            // IndependentLights > IndependentLight[@CryGUID] reference
+            // stand-alone Light entities of the same container; those are
+            // exported as entities of their own.
+            if xml.node_tag(baked) == "IndependentLights" {
+                declared_lights += xml
+                    .node_children(baked)
+                    .filter(|c| xml.node_tag(c) == "IndependentLight")
+                    .count();
+                continue;
+            }
             if xml.node_tag(baked) != "BakedInLights" {
                 continue;
             }
@@ -1214,6 +1227,7 @@ fn parse_light_group(
                 if xml.node_tag(light_node) != "Light" {
                     continue;
                 }
+                declared_lights += 1;
                 let light_name = format!("{base_name}-{idx:03}");
 
                 // Each baked-in Light node has a RelativeXForm child with
@@ -1256,8 +1270,8 @@ fn parse_light_group(
         }
     }
 
-    if lights.is_empty() {
-        // Fallback
+    if declared_lights == 0 {
+        // Fallback for a group that lists no lights at all.
         lights.push(LightInfo {
             name: base_name.to_string(),
             position: *base_pos,
@@ -1312,6 +1326,12 @@ fn build_light_info_from_component(
         .collect();
 
     let bool_truthy = |s: &str| matches!(s, "1" | "true" | "True" | "TRUE");
+    // `active="0"` switches the light off in game. Entities store only
+    // overrides of the component defaults, so a missing attribute means on.
+    if !light_component_is_active(component_attrs.get("active").copied()) {
+        log::debug!("  Light '{name}' skipped: active=0");
+        return None;
+    }
     let use_temperature = component_attrs
         .get("useTemperature")
         .map(|s| bool_truthy(s))
@@ -1470,22 +1490,13 @@ fn build_light_info_from_component(
                 .get("texture")
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty());
-            let fov = a
-                .get("FOV")
-                .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(0.0);
+            let fov = a.get("FOV").and_then(|s| s.parse::<f32>().ok());
             (tex, fov)
         })
-        .unwrap_or((None, 0.0));
+        .unwrap_or((None, None));
 
     // Spot light half-angles
-    let (inner_angle, outer_angle) = if light_type == "Projector" && fov > 0.0 {
-        let outer = fov * 0.5;
-        let inner = outer * 0.8;
-        (Some(inner), Some(outer))
-    } else {
-        (None, None)
-    };
+    let (inner_angle, outer_angle) = projector_cone_half_angles(&light_type, fov);
 
     // CryEngine authored intensity → exported candela proxy.
     let semantic_light_kind = semantic_light_kind_for_light(&light_type, inner_angle, outer_angle);
@@ -1522,6 +1533,28 @@ fn build_light_info_from_component(
         active_state: active_state_name.to_string(),
         states,
     })
+}
+
+/// Whether an `EntityComponentLight@active` value leaves the light on.
+/// Absent means the component default, which is on.
+fn light_component_is_active(active: Option<&str>) -> bool {
+    !matches!(active.map(str::trim), Some("0" | "false" | "False" | "FALSE"))
+}
+
+/// CryEngine projector FOV (full angle, degrees) when `projectorParams`
+/// leaves it out: the component default, which entities do not store.
+const DEFAULT_PROJECTOR_FOV_DEG: f32 = 90.0;
+
+/// Spot cone `(inner, outer)` half-angles in degrees for a light type and
+/// its authored `projectorParams@FOV`. Projectors are always spots; a
+/// missing or non-positive FOV takes the component default.
+fn projector_cone_half_angles(light_type: &str, fov: Option<f32>) -> (Option<f32>, Option<f32>) {
+    if light_type != "Projector" {
+        return (None, None);
+    }
+    let fov = fov.filter(|f| *f > 0.0).unwrap_or(DEFAULT_PROJECTOR_FOV_DEG);
+    let outer = fov * 0.5;
+    (Some(outer * 0.8), Some(outer))
 }
 
 fn semantic_light_kind_for_light(
@@ -1715,6 +1748,212 @@ mod tests {
 
         approx_eq3([combined[1], combined[2], combined[3]], [0.5, 0.5, 0.5]);
         assert!((combined[0] - 0.5).abs() < 1e-9);
+    }
+
+    /// Encode a small text XML document as CryXmlB, the form `.soc`
+    /// entity data has inside a socpak.
+    fn cryxmlb(text: &str) -> Vec<u8> {
+        use quick_xml::events::Event;
+        struct Node {
+            tag: String,
+            attrs: Vec<(String, String)>,
+            children: Vec<usize>,
+            parent: i32,
+        }
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut reader = quick_xml::Reader::from_str(text);
+        reader.config_mut().trim_text(true);
+        loop {
+            let (e, empty) = match reader.read_event().unwrap() {
+                Event::Start(e) => (e, false),
+                Event::Empty(e) => (e, true),
+                Event::End(_) => {
+                    stack.pop();
+                    continue;
+                }
+                Event::Eof => break,
+                _ => continue,
+            };
+            let index = nodes.len();
+            let parent = stack.last().copied();
+            nodes.push(Node {
+                tag: String::from_utf8(e.name().as_ref().to_vec()).unwrap(),
+                attrs: e
+                    .attributes()
+                    .flatten()
+                    .map(|a| {
+                        (
+                            String::from_utf8(a.key.as_ref().to_vec()).unwrap(),
+                            a.unescape_value().unwrap().into_owned(),
+                        )
+                    })
+                    .collect(),
+                children: Vec::new(),
+                parent: parent.map_or(-1, |p| p as i32),
+            });
+            if let Some(p) = parent {
+                nodes[p].children.push(index);
+            }
+            if !empty {
+                stack.push(index);
+            }
+        }
+
+        let mut strings: Vec<u8> = Vec::new();
+        let mut intern = |s: &str| -> u32 {
+            let offset = strings.len() as u32;
+            strings.extend_from_slice(s.as_bytes());
+            strings.push(0);
+            offset
+        };
+        let (mut node_table, mut child_table, mut attr_table) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut attr_count, mut child_count) = (0i32, 0i32);
+        for node in &nodes {
+            node_table.extend_from_slice(&intern(&node.tag).to_le_bytes());
+            node_table.extend_from_slice(&0u32.to_le_bytes());
+            node_table.extend_from_slice(&(node.attrs.len() as u16).to_le_bytes());
+            node_table.extend_from_slice(&(node.children.len() as u16).to_le_bytes());
+            for v in [node.parent, attr_count, child_count, 0] {
+                node_table.extend_from_slice(&v.to_le_bytes());
+            }
+            for (key, value) in &node.attrs {
+                attr_table.extend_from_slice(&intern(key).to_le_bytes());
+                attr_table.extend_from_slice(&intern(value).to_le_bytes());
+            }
+            for child in &node.children {
+                child_table.extend_from_slice(&(*child as i32).to_le_bytes());
+            }
+            attr_count += node.attrs.len() as i32;
+            child_count += node.children.len() as i32;
+        }
+
+        let node_pos = 8 + 9 * 4;
+        let child_pos = node_pos + node_table.len();
+        let attr_pos = child_pos + child_table.len();
+        let string_pos = attr_pos + attr_table.len();
+        let total = string_pos + strings.len();
+        let mut out = b"CryXmlB\0".to_vec();
+        for v in [
+            total,
+            node_pos,
+            nodes.len(),
+            attr_pos,
+            attr_count as usize,
+            child_pos,
+            child_count as usize,
+            string_pos,
+            strings.len(),
+        ] {
+            out.extend_from_slice(&(v as u32).to_le_bytes());
+        }
+        out.extend(node_table);
+        out.extend(child_table);
+        out.extend(attr_table);
+        out.extend(strings);
+        out
+    }
+
+    fn lights_of(text: &str) -> Vec<crate::types::LightInfo> {
+        let bytes = cryxmlb(text);
+        let xml = starbreaker_cryxml::from_bytes(&bytes).unwrap();
+        super::extract_cryxml_entities(&xml).1
+    }
+
+    #[test]
+    fn light_group_listing_independent_lights_emits_no_fallback_light() {
+        let lights = lights_of(
+            r#"<Entities>
+              <Entity Name="rig_group" EntityClass="LightGroup" Pos="0,0,1">
+                <EntityComponentLightGroup>
+                  <IndependentLights><IndependentLight CryGUID="a-b"/></IndependentLights>
+                  <BakedInLights/>
+                </EntityComponentLightGroup>
+              </Entity>
+              <Entity Name="key" EntityClass="Light" EntityCryGUID="a-b" Pos="1,2,3">
+                <PropertiesDataCore>
+                  <EntityComponentLight lightType="Omni"><defaultState intensity="2"/></EntityComponentLight>
+                </PropertiesDataCore>
+              </Entity>
+            </Entities>"#,
+        );
+        let names: Vec<&str> = lights.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["key"]);
+    }
+
+    #[test]
+    fn light_group_listing_no_lights_keeps_the_fallback_light() {
+        let lights = lights_of(
+            r#"<Entities>
+              <Entity Name="empty_group" EntityClass="LightGroup">
+                <EntityComponentLightGroup><IndependentLights/><BakedInLights/></EntityComponentLightGroup>
+              </Entity>
+            </Entities>"#,
+        );
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].name, "empty_group");
+    }
+
+    #[test]
+    fn inactive_lights_are_skipped_without_a_group_fallback() {
+        let lights = lights_of(
+            r#"<Entities>
+              <Entity Name="off" EntityClass="Light">
+                <PropertiesDataCore>
+                  <EntityComponentLight active="0" lightType="Omni"><defaultState intensity="2"/></EntityComponentLight>
+                </PropertiesDataCore>
+              </Entity>
+              <Entity Name="group" EntityClass="LightGroup">
+                <EntityComponentLightGroup>
+                  <BakedInLights>
+                    <Light Name="a"><EntityComponentLight active="0" lightType="Omni"/></Light>
+                    <Light Name="b"><EntityComponentLight lightType="Omni"><defaultState intensity="1"/></EntityComponentLight></Light>
+                  </BakedInLights>
+                </EntityComponentLightGroup>
+              </Entity>
+            </Entities>"#,
+        );
+        let names: Vec<&str> = lights.iter().map(|l| l.name.as_str()).collect();
+        // The baked-in light keeps its index in the group.
+        assert_eq!(names, ["group-001"]);
+    }
+
+    #[test]
+    fn projector_without_fov_is_a_90_degree_spot() {
+        let lights = lights_of(
+            r#"<Entities>
+              <Entity Name="no_params" EntityClass="Light">
+                <PropertiesDataCore><EntityComponentLight lightType="Projector"/></PropertiesDataCore>
+              </Entity>
+              <Entity Name="no_fov" EntityClass="Light">
+                <PropertiesDataCore>
+                  <EntityComponentLight lightType="Projector"><projectorParams texture="t.dds"/></EntityComponentLight>
+                </PropertiesDataCore>
+              </Entity>
+              <Entity Name="fov_60" EntityClass="Light">
+                <PropertiesDataCore>
+                  <EntityComponentLight lightType="Projector"><projectorParams FOV="60"/></EntityComponentLight>
+                </PropertiesDataCore>
+              </Entity>
+            </Entities>"#,
+        );
+        let cones: Vec<(Option<f32>, Option<f32>, &str)> = lights
+            .iter()
+            .map(|l| (l.inner_angle, l.outer_angle, l.semantic_light_kind.as_str()))
+            .collect();
+        assert_eq!(
+            cones,
+            [
+                (Some(36.0), Some(45.0), "spot"),
+                (Some(36.0), Some(45.0), "spot"),
+                (Some(24.0), Some(30.0), "spot"),
+            ]
+        );
+    }
+
+    #[test]
+    fn omni_light_has_no_cone() {
+        assert_eq!(super::projector_cone_half_angles("Omni", Some(60.0)), (None, None));
     }
 
     #[test]

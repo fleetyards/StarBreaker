@@ -889,12 +889,11 @@ impl GlbBuilder {
 
                 let node_idx = self.nodes_json.len() as u32;
                 let pos = light.position;
-                let rot = light.rotation;
                 self.nodes_json.push(json::Node {
                     name: Some(light.name.clone()),
                     translation: Some([pos[0] as f32, pos[1] as f32, pos[2] as f32]),
                     rotation: Some(json::scene::UnitQuaternion(
-                        [rot[1] as f32, rot[2] as f32, rot[3] as f32, rot[0] as f32],
+                        cryengine_light_rotation_to_gltf_node(&light.rotation),
                     )),
                     extensions: Some(json::extensions::scene::Node {
                         khr_lights_punctual: Some(
@@ -2898,6 +2897,48 @@ fn pack_texture_deduped(
     Some(region)
 }
 
+
+/// glTF rotation `[x, y, z, w]` of a light node from a CryEngine light
+/// rotation `[w, x, y, z]`.
+///
+/// CryEngine projectors shine along the entity's local +X; KHR_lights_punctual
+/// spots shine along the node's local -Z. The node gets the entity rotation
+/// followed by Ry(-90 deg), which turns local -Z onto local +X, so the spot
+/// cone points where the game aims it. Point lights get the same frame (it
+/// does not change how they light).
+fn cryengine_light_rotation_to_gltf_node(rotation: &[f64; 4]) -> [f32; 4] {
+    let entity = glam::DQuat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]);
+    let q = (entity * glam::DQuat::from_rotation_y(-std::f64::consts::FRAC_PI_2)).normalize();
+    [q.x as f32, q.y as f32, q.z as f32, q.w as f32]
+}
+
+#[cfg(test)]
+mod light_node_tests {
+    use super::cryengine_light_rotation_to_gltf_node;
+
+    fn spot_axis(rotation: &[f64; 4]) -> glam::Vec3 {
+        let [x, y, z, w] = cryengine_light_rotation_to_gltf_node(rotation);
+        glam::Quat::from_xyzw(x, y, z, w) * glam::Vec3::NEG_Z
+    }
+
+    fn assert_close(left: glam::Vec3, right: glam::Vec3) {
+        assert!((left - right).length() < 1e-5, "left={left:?} right={right:?}");
+    }
+
+    #[test]
+    fn identity_light_spot_points_along_cryengine_plus_x() {
+        assert_close(spot_axis(&[1.0, 0.0, 0.0, 0.0]), glam::Vec3::X);
+    }
+
+    #[test]
+    fn rotated_light_spot_follows_the_entity_forward() {
+        // 90 deg about Z: CryEngine forward +X turns to +Y.
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        assert_close(spot_axis(&[h, 0.0, 0.0, h]), glam::Vec3::Y);
+        // 90 deg about Y: +X turns to -Z (a light aimed straight down).
+        assert_close(spot_axis(&[h, 0.0, h, 0.0]), glam::Vec3::NEG_Z);
+    }
+}
 
 #[cfg(test)]
 mod pop_guard_tests {
