@@ -7,6 +7,14 @@ pub fn decode_half2(raw: [u16; 2]) -> [f32; 2] {
     ]
 }
 
+/// `decode_half2` for texture coordinates: a non-finite half (±Inf / NaN, seen on a few
+/// vertices of e.g. m_rsi_pilot_flightsuit_helmet_01.skin, u = 0xFC00 = -Inf) becomes 0.0,
+/// since glTF forbids non-finite accessor values and the validator rejects the whole file.
+pub fn decode_uv_half2(raw: [u16; 2]) -> [f32; 2] {
+    let [u, v] = decode_half2(raw);
+    [if u.is_finite() { u } else { 0.0 }, if v.is_finite() { v } else { 0.0 }]
+}
+
 pub fn decode_half4(raw: [u16; 4]) -> [f32; 4] {
     [
         f16::from_bits(raw[0]).to_f32(),
@@ -164,6 +172,14 @@ mod tests {
     fn decode_half2_known_values() {
         let result = decode_half2([0x3C00, 0x0000]);
         assert_eq!(result, [1.0, 0.0]);
+    }
+
+    #[test]
+    fn decode_uv_half2_non_finite_is_zero() {
+        // -Inf, +Inf, NaN -> 0; finite values pass through
+        assert_eq!(decode_uv_half2([0xFC00, 0xBC00]), [0.0, -1.0]);
+        assert_eq!(decode_uv_half2([0x7C00, 0x7E00]), [0.0, 0.0]);
+        assert_eq!(decode_uv_half2([0x3C00, 0x3800]), [1.0, 0.5]);
     }
 
     #[test]

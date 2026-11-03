@@ -363,13 +363,13 @@ fn build_mesh_impl(
             skin.streams
                 .uvs
                 .iter()
-                .map(|uv| dequant::decode_half2(*uv))
+                .map(|uv| dequant::decode_uv_half2(*uv))
                 .collect(),
         )
     };
     let secondary_uvs: Option<Vec<[f32; 2]>> = skin.streams.secondary_uvs.as_ref().map(|uvs| {
         uvs.iter()
-            .map(|uv| dequant::decode_half2(*uv))
+            .map(|uv| dequant::decode_uv_half2(*uv))
             .collect()
     });
 
